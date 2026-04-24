@@ -101,9 +101,9 @@ def run():
 
     print(f"  ✅ 完成 {len(all_with_indicators)} 支股票指標計算")
 
-    # 8. 讀取最近 5 日法人數據，計算綜合評分
+    # 8. 讀取最近 10 日法人數據（多載供連續買進天數計算，3d/5d 累計仍取最近幾日）
     print("\n🏆 計算評分與分類...")
-    inst_data = load_institutional(days=5)
+    inst_data = load_institutional(days=10)
     scores_df = calculate_all_scores(all_df, inst_data)
 
     if scores_df.empty:

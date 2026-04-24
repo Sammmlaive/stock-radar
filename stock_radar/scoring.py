@@ -131,9 +131,10 @@ def calculate_all_scores(price_df: pd.DataFrame, inst_multi_df: pd.DataFrame = N
     """
 
     # ── 建立法人查找表（以代號為 key）────────────────
-    inst_today = {}   # 當日法人  {code: {foreign_net, trust_net, ...}}
-    inst_3d    = {}   # 三日累計  {code: {foreign_3d, trust_3d, total_3d}}
-    inst_5d    = {}   # 五日累計  {code: {foreign_5d, trust_5d, total_5d}}
+    inst_today       = {}   # 當日法人  {code: {foreign_net, trust_net, ...}}
+    inst_3d          = {}   # 三日累計  {code: {foreign_3d, trust_3d, total_3d}}
+    inst_5d          = {}   # 五日累計  {code: {foreign_5d, trust_5d, total_5d}}
+    inst_consecutive = {}   # 法人連續買進天數 {code: int}
 
     if inst_multi_df is not None and not inst_multi_df.empty:
         dates = sorted(inst_multi_df['date'].unique())
@@ -159,13 +160,25 @@ def calculate_all_scores(price_df: pd.DataFrame, inst_multi_df: pd.DataFrame = N
             }
 
         # 五日累計（全部，最多 5 日）
-        grp5 = inst_multi_df.groupby('code')
+        dates_5d = dates[-5:]
+        grp5 = inst_multi_df[inst_multi_df['date'].isin(dates_5d)].groupby('code')
         for code, g in grp5:
             inst_5d[code] = {
                 'foreign_5d': round(g['foreign_net'].sum(), 0),
                 'trust_5d':   round(g['trust_net'].sum(),   0),
                 'total_5d':   round(g['total_net'].sum(),   0),
             }
+
+        # 法人連續買進天數（從最新日往回數，total_net > 0 才算）
+        for code, group in inst_multi_df.groupby('code'):
+            sorted_g = group.sort_values('date', ascending=False)
+            count = 0
+            for _, row in sorted_g.iterrows():
+                if (row.get('total_net', 0) or 0) > 0:
+                    count += 1
+                else:
+                    break
+            inst_consecutive[code] = count
 
     # ── 逐支股票評分 ─────────────────────────────────
     results = []
@@ -187,6 +200,15 @@ def calculate_all_scores(price_df: pd.DataFrame, inst_multi_df: pd.DataFrame = N
 
         # 偵測 4 種明確買進訊號
         buy_signal_list = detect_buy_signals(latest_series, prev, today_inst)
+
+        # 訊號強弱：多訊號同時出現，或單訊號配合放量，才算強
+        vol_r_val = g('vol_ratio') or 1
+        if len(buy_signal_list) >= 2 or (len(buy_signal_list) == 1 and vol_r_val >= 1.5):
+            signal_strength = '強'
+        elif len(buy_signal_list) == 1:
+            signal_strength = '普通'
+        else:
+            signal_strength = ''
 
         def g(k):
             v = latest.get(k)
@@ -229,10 +251,13 @@ def calculate_all_scores(price_df: pd.DataFrame, inst_multi_df: pd.DataFrame = N
             'foreign_5d':  five_d.get('foreign_5d',  0),
             'trust_5d':    five_d.get('trust_5d',    0),
             'total_5d':    five_d.get('total_5d',    0),
-            'score':       score,
-            'category':    category,
-            'signals':     '、'.join(signals) if signals else '—',
-            'buy_signals': '、'.join(buy_signal_list) if buy_signal_list else '',
+            'week52_pos':      round(g('week52_pos') or 0, 1),
+            'inst_consec':     inst_consecutive.get(code, 0),
+            'score':           score,
+            'category':        category,
+            'signals':         '、'.join(signals) if signals else '—',
+            'buy_signals':     '、'.join(buy_signal_list) if buy_signal_list else '',
+            'signal_strength': signal_strength,
         })
 
     df = pd.DataFrame(results).sort_values('score', ascending=False).reset_index(drop=True)

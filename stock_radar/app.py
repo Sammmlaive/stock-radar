@@ -11,6 +11,25 @@ import pandas as pd
 import subprocess
 from database import load_scores, has_data
 
+
+@st.cache_data(ttl=3600)
+def fetch_taiex():
+    """抓取加權指數最新數據，每小時更新一次"""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker("^TWII").history(period="5d")
+        if len(hist) >= 2:
+            today = hist['Close'].iloc[-1]
+            prev  = hist['Close'].iloc[-2]
+            chg   = today - prev
+            chg_pct = chg / prev * 100
+            return round(today, 2), round(chg, 2), round(chg_pct, 2)
+        elif len(hist) == 1:
+            return round(hist['Close'].iloc[-1], 2), 0.0, 0.0
+    except Exception:
+        pass
+    return None, None, None
+
 st.set_page_config(
     page_title="台股全市場雷達",
     page_icon="📡",
@@ -93,15 +112,23 @@ last_date = df['date'].iloc[0] if not df.empty else "—"
 st.title(f"📡 台股全市場雷達  ·  {last_date}")
 
 total = len(df)
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 def pct(n): return f"{n/total*100:.1f}%" if total > 0 else "0%"
 n_s = len(df[df['category'] == '強勢'])
 n_n = len(df[df['category'] == '中性'])
 n_w = len(df[df['category'] == '弱勢'])
 
-c1.metric("🔴 強勢", n_s, pct(n_s))
-c2.metric("⚪ 中性", n_n, pct(n_n))
-c3.metric("💙 弱勢", n_w, pct(n_w))
+# 加權指數
+taiex_close, taiex_chg, taiex_chg_pct = fetch_taiex()
+if taiex_close:
+    chg_str = f"{taiex_chg:+.2f} ({taiex_chg_pct:+.2f}%)"
+    c1.metric("📈 加權指數", f"{taiex_close:,.2f}", chg_str)
+else:
+    c1.metric("📈 加權指數", "—")
+
+c2.metric("🔴 強勢", n_s, pct(n_s))
+c3.metric("⚪ 中性", n_n, pct(n_n))
+c4.metric("💙 弱勢", n_w, pct(n_w))
 st.caption(f"共 {total} 支股票 ｜ 目前顯示 {len(df_view)} 支")
 st.divider()
 
@@ -216,7 +243,29 @@ with tab0:
                     f'font-size:12px;font-weight:600">{label}</span>')
 
         # ── 建立 HTML 表格 ───────────────────────────────
-        th = '<th style="padding:10px 8px;white-space:nowrap">'
+        def pos_badge(pos):
+            """52週位置：顏色區分高中低"""
+            if pos is None or pos == 0:
+                return '—'
+            pos = float(pos)
+            if pos >= 80:
+                color, bg = '#b71c1c', '#ffebee'
+            elif pos >= 50:
+                color, bg = '#7f4500', '#fff3e0'
+            else:
+                color, bg = '#0d47a1', '#e3f2fd'
+            return (f'<span style="background:{bg};color:{color};border:1px solid {color};'
+                    f'padding:2px 8px;border-radius:12px;font-size:12px;font-weight:600">'
+                    f'{pos:.0f}%</span>')
+
+        def strength_badge(s):
+            if s == '強':
+                return '<span style="background:#1b5e20;color:#e8f5e9;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:700">⚡ 強</span>'
+            elif s == '普通':
+                return '<span style="background:#424242;color:#eee;padding:2px 10px;border-radius:12px;font-size:12px">普通</span>'
+            return '—'
+
+        th  = '<th style="padding:10px 8px;white-space:nowrap">'
         thr = '<th style="padding:10px 8px;text-align:right;white-space:nowrap">'
         html_parts = [
             '<html><body style="margin:0;padding:0;background:transparent">',
@@ -224,28 +273,33 @@ with tab0:
             '<thead><tr style="background:#1e1e2e;color:#aaa;text-align:left">',
             f'{th}#</th>{th}代號</th>{th}名稱</th>',
             f'{thr}收盤價</th>{thr}漲跌%</th>{thr}量比</th>',
-            f'{thr}法人合計</th>{thr}RSI</th>{thr}評分</th>',
-            f'{th}狀態</th>{th}觸發訊號</th>',
+            f'{thr}法人合計</th>{thr}連續買進</th>{thr}RSI</th>',
+            f'{th}52週位置</th>{th}強弱</th>{th}狀態</th>{th}觸發訊號</th>',
             '</tr></thead><tbody>',
         ]
 
         for n, (_, row) in enumerate(rec_df.iterrows()):
-            chg     = row.get('change_pct', 0) or 0
-            chg_clr = '#ef5350' if chg > 0 else ('#42a5f5' if chg < 0 else '#aaa')
-            bg      = '#16161e' if n % 2 == 0 else '#1a1a28'
-            td      = f'style="padding:10px 8px;background:{bg}"'
-            tdr     = f'style="padding:10px 8px;text-align:right;background:{bg}"'
+            chg      = row.get('change_pct', 0) or 0
+            chg_clr  = '#ef5350' if chg > 0 else ('#42a5f5' if chg < 0 else '#aaa')
+            bg       = '#16161e' if n % 2 == 0 else '#1a1a28'
+            consec   = int(row.get('inst_consec', 0) or 0)
+            consec_s = f'{consec}天' if consec > 0 else '—'
+            consec_c = '#66bb6a' if consec >= 3 else ('#ffb74d' if consec >= 1 else '#888')
+            td       = f'style="padding:10px 8px;background:{bg}"'
+            tdr      = f'style="padding:10px 8px;text-align:right;background:{bg}"'
             html_parts.append(
                 f'<tr>'
-                f'<td {td} style="padding:10px 8px;background:{bg};color:#666">{n+1}</td>'
-                f'<td {td} style="padding:10px 8px;background:{bg};font-weight:700;color:#ffd54f">{row["code"]}</td>'
+                f'<td style="padding:10px 8px;background:{bg};color:#666">{n+1}</td>'
+                f'<td style="padding:10px 8px;background:{bg};font-weight:700;color:#ffd54f">{row["code"]}</td>'
                 f'<td {td}>{row.get("name","")}</td>'
                 f'<td {tdr}>{row.get("close",0):.2f}</td>'
                 f'<td style="padding:10px 8px;text-align:right;background:{bg};color:{chg_clr};font-weight:600">{chg:+.2f}%</td>'
                 f'<td {tdr}>{row.get("vol_ratio",0):.2f}</td>'
                 f'<td {tdr}>{int(row.get("total_net",0) or 0):,}</td>'
+                f'<td style="padding:10px 8px;text-align:right;background:{bg};color:{consec_c};font-weight:600">{consec_s}</td>'
                 f'<td {tdr}>{row.get("rsi",0):.1f}</td>'
-                f'<td style="padding:10px 8px;text-align:right;background:{bg};font-weight:700;color:#fff">{row.get("score",0):.0f}</td>'
+                f'<td {td}>{pos_badge(row.get("week52_pos"))}</td>'
+                f'<td {td}>{strength_badge(row.get("signal_strength",""))}</td>'
                 f'<td {td}>{cat_badge(row.get("category",""))}</td>'
                 f'<td {td}>{signal_badges(row.get("buy_signals",""))}</td>'
                 f'</tr>'
@@ -254,7 +308,7 @@ with tab0:
         html_parts.append('</tbody></table></body></html>')
         table_html = ''.join(html_parts)
 
-        row_height = 52
+        row_height   = 52
         table_height = 60 + len(rec_df) * row_height
         components.html(table_html, height=table_height, scrolling=False)
         st.caption(f"共 {len(rec_df)} 支股票觸發買進訊號（依評分高→低排序）")

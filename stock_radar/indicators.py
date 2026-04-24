@@ -61,6 +61,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['vol_ma20']  = volume.rolling(VOLUME_AVG_DAYS).mean()
     df['vol_ratio'] = (volume / df['vol_ma20']).round(2)
 
+    # ── 52週高低點（最多取 252 根K線，至少 60 根才計算）──
+    df['week52_high'] = close.rolling(252, min_periods=60).max()
+    df['week52_low']  = close.rolling(252, min_periods=60).min()
+    rng = df['week52_high'] - df['week52_low']
+    df['week52_pos']  = ((close - df['week52_low']) / rng.replace(0, np.nan) * 100).round(1)
+
     # ── 漲跌幅（%）────────────────────────────
     df['change_pct'] = close.pct_change() * 100
 

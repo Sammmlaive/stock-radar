@@ -91,7 +91,10 @@ def init_db():
         ("foreign_5d",  "REAL"),
         ("trust_5d",    "REAL"),
         ("total_5d",    "REAL"),
-        ("buy_signals", "TEXT"),   # 4 種明確買進訊號
+        ("buy_signals",      "TEXT"),    # 4 種明確買進訊號
+        ("week52_pos",       "REAL"),    # 52週價格位置（0%=最低，100%=最高）
+        ("inst_consec",      "INTEGER"), # 法人連續買進天數
+        ("signal_strength",  "TEXT"),    # 訊號強弱（強 / 普通）
     ]
     for col, dtype in new_cols:
         try:
@@ -146,7 +149,8 @@ def save_scores(df):
             'foreign_net', 'trust_net', 'dealer_net', 'total_net',
             'foreign_3d', 'trust_3d', 'total_3d',
             'foreign_5d', 'trust_5d', 'total_5d',
-            'score', 'category', 'signals', 'buy_signals']
+            'score', 'category', 'signals', 'buy_signals',
+            'week52_pos', 'inst_consec', 'signal_strength']
     for _, row in df.iterrows():
         vals = [row.get(c) for c in cols]
         conn.execute(f"""
