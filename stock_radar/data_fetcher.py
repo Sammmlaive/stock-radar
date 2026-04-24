@@ -47,52 +47,88 @@ def fetch_stock_list():
 # 2. 今日行情（一次取得全部）
 # ────────────────────────────────────────────
 
-def fetch_today_prices():
-    """從台灣證交所取得最新收盤資料
-    注意：TWSE API 用民國年格式（如 '1150423' = 2026-04-23），
-    以 API 實際回傳的日期為準，不用系統時間，避免日期錯誤
+def fetch_today_prices(codes=None):
+    """使用 TWSE 官方 API（指定日期）取得最新收盤價
+    自動往回找最近的交易日（最多往回 7 天，自動跳過假日與週末）
+    比 openapi 端點更即時：台股 1:30 收盤後即可取得
+    codes: 台股代號清單（傳入時只回傳這些股票，None = 全部）
     """
     print("💹 取得今日行情...")
-    url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        df = pd.DataFrame(data)
-        df = df[df['Code'].str.match(r'^\d{4}$')].copy()
 
-        def clean(col):
-            return pd.to_numeric(df[col].str.replace(',', ''), errors='coerce')
+    def clean_price(s):
+        try:
+            return float(str(s).replace(',', ''))
+        except (ValueError, AttributeError):
+            return None
 
-        # 從 API 的民國年日期（如 '1150423'）轉為西元（'2026-04-23'）
-        raw_date = df['Date'].iloc[0]
-        api_date = f"{int(raw_date[:3]) + 1911}-{raw_date[3:5]}-{raw_date[5:7]}"
+    def clean_change(s):
+        try:
+            s = str(s).replace(',', '').replace('+', '').strip()
+            return 0.0 if s.startswith('X') or s == '--' else float(s)
+        except (ValueError, AttributeError):
+            return 0.0
 
-        # Change 欄位 = 今日漲跌金額，計算漲跌%
-        change_amt  = clean('Change')
-        close_price = clean('ClosingPrice')
-        prev_close  = close_price - change_amt
-        change_pct  = (change_amt / prev_close * 100).where(prev_close.abs() > 0.001, 0).round(2)
+    check_date = datetime.now()
+    for _ in range(7):
+        date_str = check_date.strftime('%Y%m%d')
+        url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json&date={date_str}"
 
-        result = pd.DataFrame({
-            'date':       api_date,
-            'code':       df['Code'].values,
-            'open':       clean('OpeningPrice').values,
-            'high':       clean('HighestPrice').values,
-            'low':        clean('LowestPrice').values,
-            'close':      close_price.values,
-            'volume':     clean('TradeVolume').values,
-            'amount':     clean('TradeValue').values,
-            'change_pct': change_pct.values,
-        })
+        try:
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+            resp.raise_for_status()
+            raw = resp.json()
 
-        result = result.dropna(subset=['close'])
-        result = result[result['close'] > 0]
-        print(f"  ✅ 共 {len(result)} 檔（資料日期：{api_date}）")
-        return result
-    except Exception as e:
-        print(f"  ❌ 失敗：{e}")
-        return None
+            if raw.get('stat') != 'OK' or not raw.get('data'):
+                check_date -= timedelta(days=1)
+                time.sleep(0.5)
+                continue
+
+            date_raw = raw['date']  # 'YYYYMMDD'
+            api_date = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:]}"
+
+            records = []
+            for row in raw['data']:
+                code = row[0].strip()
+                if not code or not code.isdigit() or len(code) != 4:
+                    continue
+
+                close      = clean_price(row[7])
+                change_amt = clean_change(row[8])
+
+                if close is None or close <= 0:
+                    continue
+
+                prev_close = close - change_amt
+                change_pct = round(change_amt / prev_close * 100, 2) if abs(prev_close) > 0.001 else 0.0
+
+                records.append({
+                    'date':       api_date,
+                    'code':       code,
+                    'open':       clean_price(row[4]),
+                    'high':       clean_price(row[5]),
+                    'low':        clean_price(row[6]),
+                    'close':      close,
+                    'volume':     clean_price(row[2]),
+                    'amount':     clean_price(row[3]),
+                    'change_pct': change_pct,
+                })
+
+            result = pd.DataFrame(records).dropna(subset=['close'])
+            result = result[result['close'] > 0]
+
+            if codes:
+                result = result[result['code'].isin(codes)]
+
+            print(f"  ✅ 共 {len(result)} 檔（資料日期：{api_date}）")
+            return result
+
+        except Exception as e:
+            print(f"  ⚠️ {date_str} 查詢失敗：{e}")
+            check_date -= timedelta(days=1)
+            time.sleep(0.5)
+
+    print("  ❌ 無法取得行情數據（最近 7 天均無可用數據）")
+    return None
 
 
 # ────────────────────────────────────────────

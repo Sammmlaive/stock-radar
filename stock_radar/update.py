@@ -59,8 +59,8 @@ def run():
         save_institutional(institutional)
         print(f"  📅 確認最新交易日：{actual_date}")
 
-    # 6. 抓取今日行情（使用 API 回傳的實際日期，不強制覆蓋）
-    today_prices = fetch_today_prices()
+    # 6. 抓取今日行情（yfinance，以收盤後即時數據為準）
+    today_prices = fetch_today_prices(stock_list['code'].tolist())
     if today_prices is not None:
         save_prices(today_prices)
 

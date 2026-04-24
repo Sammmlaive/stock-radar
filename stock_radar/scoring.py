@@ -196,6 +196,12 @@ def calculate_all_scores(price_df: pd.DataFrame, inst_multi_df: pd.DataFrame = N
         latest_with_inst.update(today_inst)
         latest_series = pd.Series(latest_with_inst)
 
+        def g(k):
+            v = latest.get(k)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return None
+            return v
+
         score, category, signals = score_stock(latest_series, prev)
 
         # 偵測 4 種明確買進訊號
@@ -209,12 +215,6 @@ def calculate_all_scores(price_df: pd.DataFrame, inst_multi_df: pd.DataFrame = N
             signal_strength = '普通'
         else:
             signal_strength = ''
-
-        def g(k):
-            v = latest.get(k)
-            if v is None or (isinstance(v, float) and np.isnan(v)):
-                return None
-            return v
 
         # 直接由前後兩日收盤算漲跌幅（比 pct_change 更可靠）
         close_now  = g('close') or 0
