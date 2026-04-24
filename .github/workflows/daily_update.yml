@@ -1,0 +1,39 @@
+name: 每日股票數據更新
+
+on:
+  schedule:
+    # 台灣時間下午 4:30 = UTC 08:30（週一到週五）
+    - cron: '30 8 * * 1-5'
+  workflow_dispatch:  # 允許手動觸發
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 下載程式碼
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 執行數據更新
+        env:
+          CLOUD_MODE: "true"
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python stock_radar/update.py
+
+      - name: 提交更新後的數據庫
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add stock_radar/data/stocks.db
+          git diff --staged --quiet || git commit -m "📊 每日數據更新 $(date +'%Y-%m-%d')"
+          git push

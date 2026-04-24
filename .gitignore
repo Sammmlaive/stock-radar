@@ -1,0 +1,22 @@
+# Claude Code 本機設定
+.claude/
+
+# 系統檔案
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+
+# 編輯器
+.vscode/
+*.code-workspace
+
+# 本機私密設定
+.streamlit/secrets.toml
+
+# 不需要上傳的文件
+日誌.md
+選股系統.docx
+CLAUDE.md
