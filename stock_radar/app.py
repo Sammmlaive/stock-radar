@@ -9,7 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import subprocess
-from database import load_scores, load_scores_history, has_data
+from database import load_scores, load_scores_history, load_ohlcv_recent, has_data
 
 
 @st.cache_data(ttl=3600)
@@ -237,10 +237,95 @@ def classify_pullback(hist: pd.DataFrame) -> bool:
     return True
 
 
+def classify_n_reversal(hist: pd.DataFrame):
+    """
+    N字反轉型態偵測（參考 XHS 結構警報器指標邏輯）
+
+    X段定義：
+      - 起點：過去 90 天內的波段高點（pivot high，左右各至少 3 根K線都更低）
+      - 底部：該高點之後的最低點（X段低點）
+      - 幅度：起點到底部至少下跌 5%
+
+    觸發條件（5 項全部成立）：
+      1. 找到符合條件的 X 段（有明確下跌結構）
+      2. 突破時機正確：最近 7 天內收盤首次突破 X 段起點
+      3. 突破前確實被壓制：突破前收盤從未超過 X 段起點
+      4. 訊號仍有效：今日低點 > X 段底部（沒有跌破底部）
+      5. 未過度延伸：今日收盤 < X低 + 2×X段高度
+
+    回傳 dict（有訊號）或 None（無訊號）
+    dict 包含：x_high（X段起點）、x_low（X段底部）、decline_pct（X段跌幅）、break_pct（突破後漲幅）
+    """
+    needed = {'high', 'low', 'close'}
+    if len(hist) < 20 or not needed.issubset(hist.columns):
+        return None
+
+    hist = hist.sort_values('date').reset_index(drop=True)
+    n = len(hist)
+    closes = hist['close'].values
+    highs  = hist['high'].values
+    lows   = hist['low'].values
+
+    latest_close = closes[-1]
+    latest_low   = lows[-1]
+
+    pivot_len = 3       # 左右各 3 根K線確認波段高點
+    recent_window = 7   # 突破必須在最近 7 天內發生
+
+    # 掃描所有可能的 X 段起點（不掃太近的K線，要留給突破區間）
+    for i in range(pivot_len, n - recent_window - 1):
+        # ── 判斷是否為波段高點 ──
+        left_ok  = all(highs[i] > highs[i - k] for k in range(1, pivot_len + 1))
+        right_ok = all(highs[i] > highs[i + k] for k in range(1, pivot_len + 1))
+        if not (left_ok and right_ok):
+            continue
+
+        pivot_high = highs[i]
+
+        # ── X 段底部：高點之後到「最近 7 天前」的最低點 ──
+        search_lows = lows[i + 1 : n - recent_window]
+        if len(search_lows) < 3:
+            continue
+        x_low = float(min(search_lows))
+
+        # ── X 段必須有至少 5% 跌幅 ──
+        x_height = pivot_high - x_low
+        if x_height < pivot_high * 0.05:
+            continue
+
+        # ── 突破前（最近 7 天外）收盤從未超過 pivot_high（確認是真實阻力） ──
+        pre_break_max = float(max(closes[i + 1 : n - recent_window])) if n - recent_window > i + 1 else 0
+        if pre_break_max >= pivot_high:
+            continue  # 之前已突破過，不算新的 N字
+
+        # ── 最近 7 天內，至少有一天收盤突破 pivot_high ──
+        recent_closes = closes[n - recent_window:]
+        if not any(c > pivot_high for c in recent_closes):
+            continue
+
+        # ── 今日低點不能跌破 X 段底部（訊號仍有效） ──
+        if latest_low <= x_low:
+            continue
+
+        # ── 未過度延伸（收盤 < x_low + 2×x_height） ──
+        invalid_price = x_low + x_height * 2
+        if latest_close >= invalid_price:
+            continue
+
+        return {
+            'x_high':      round(pivot_high, 2),
+            'x_low':       round(x_low, 2),
+            'decline_pct': round(x_height / pivot_high * 100, 1),
+            'break_pct':   round((latest_close - pivot_high) / pivot_high * 100, 1),
+        }
+
+    return None
+
+
 # ──────────────────────────────────────────────────────
 # 分頁
 # ──────────────────────────────────────────────────────
-tab0, tab1, tab1b, tab2, tab3, tab4 = st.tabs(["🎯 今日推薦", "🔴 強勢股", "📉 回調整理", "💙 弱勢股", "🔍 全部股票", "📊 市場分析"])
+tab0, tab1, tab1b, tab1c, tab2, tab3, tab4 = st.tabs(["🎯 今日推薦", "🔴 強勢股", "📉 回調整理", "🔼 N字反轉", "💙 弱勢股", "🔍 全部股票", "📊 市場分析"])
 
 # ── Tab 0：今日推薦 ───────────────────────────────────
 with tab0:
@@ -538,6 +623,100 @@ with tab1b:
         st.caption(f"共篩選出 **{len(pullback_df)}** 支 ｜ 依評分高→低排序")
         st.dataframe(fmt(pullback_df), use_container_width=True, height=520, hide_index=True)
         st.caption("💡 建議搭配「今日推薦」頁面確認是否同時觸發買進訊號，雙重確認後再進場評估")
+
+# ── Tab 1c：N字反轉 ───────────────────────────────────
+with tab1c:
+    st.markdown("### 🔼 N字反轉突破")
+
+    with st.expander("📖 什麼是「N字反轉」？篩選邏輯說明（點擊展開）", expanded=True):
+        st.markdown("""
+**概念說明**
+
+N字反轉是一種**下跌段後的突破型態**，形狀像英文字母 N：
+
+```
+    起點（X高）
+   /
+  /   ← X段：明確下跌段
+ /
+底部（X低）
+         \\
+          \\  ← 反彈突破起點
+           突破！（今日位置）
+```
+
+股票先經歷一段明確下跌（X段），隨後反彈突破前波段高點，
+代表空方能量耗盡，多方正式接管。
+
+> 類比：就像 TradingView 的 XHS 結構警報器——只要沒有跌破底部，信號就持續有效。
+
+---
+
+**系統篩選條件（5 項全部符合才納入）**
+
+| # | 條件 | 說明 |
+|---|------|------|
+| 1 | **有明確 X 段結構** | 找到波段高點（左右各 3 根K線更低），且高點到底部跌幅 ≥ 5% |
+| 2 | **突破是近期發生的** | 最近 7 天內，收盤首次突破 X 段起點（前波段高點） |
+| 3 | **突破前確實被壓制** | 在最近 7 天以前，收盤從未超過 X 段起點（確認是真實阻力位） |
+| 4 | **訊號仍然有效** | 今日低點 > X 段底部（沒有跌破底部，信號沒有失效） |
+| 5 | **未過度延伸** | 今日收盤 < X低 + 2×X段高度（沒有漲過頭，還有追蹤空間） |
+
+**關鍵欄位說明**
+
+| 欄位 | 意義 |
+|------|------|
+| **X高** | X段起點（前波段高點，突破目標） |
+| **X低** | X段底部（跌破這裡信號失效，可作為止損參考） |
+| **X跌幅** | X段從起點到底部的跌幅百分比 |
+| **突破後漲幅** | 今日收盤相對於 X高 的漲幅 |
+
+> ⚠️ **重要提醒**：
+> - X低 可作為**止損參考位**——跌破 X低 代表型態失效
+> - 突破幅度越小（剛剛突破）風險報酬比越好
+> - 建議搭配成交量確認：突破當天量比 > 1.5 倍更可信
+""")
+
+    # ── 計算 N字反轉 ──
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def get_n_reversal_results():
+        ohlcv_df = load_ohlcv_recent(days=90)
+        if ohlcv_df.empty:
+            return [], {}
+        results = []
+        details = {}
+        for code, grp in ohlcv_df.groupby('code'):
+            info = classify_n_reversal(grp.sort_values('date').reset_index(drop=True))
+            if info is not None:
+                results.append(code)
+                details[code] = info
+        return results, details
+
+    with st.spinner("正在掃描 N字反轉型態（約需 5-15 秒）…"):
+        n_codes, n_details = get_n_reversal_results()
+
+    n_df = df[df['code'].isin(n_codes)].copy()
+
+    # 加入 X段細節欄位
+    if not n_df.empty and n_details:
+        n_df['X高']    = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_high', ''))
+        n_df['X低']    = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_low', ''))
+        n_df['X跌幅%'] = n_df['code'].map(lambda c: n_details.get(c, {}).get('decline_pct', ''))
+        n_df['突破後漲%'] = n_df['code'].map(lambda c: n_details.get(c, {}).get('break_pct', ''))
+        n_df = n_df.sort_values('突破後漲%')  # 突破幅度小的排前面（剛突破，機會更好）
+
+    if n_df.empty:
+        st.info("📭 今日無符合「N字反轉突破」型態的股票（可能因資料不足或市場無此結構）")
+    else:
+        st.caption(f"共篩選出 **{len(n_df)}** 支 ｜ 依突破後漲幅由小→大排序（剛突破的排前面）")
+
+        # 顯示含 X段資訊的表格
+        show_cols = ['code', 'name', 'close', 'change_pct', 'volume', 'vol_ratio',
+                     'X高', 'X低', 'X跌幅%', '突破後漲%', 'score', 'signals']
+        avail_cols = [c for c in show_cols if c in n_df.columns]
+        st.dataframe(n_df[avail_cols].reset_index(drop=True), use_container_width=True, height=520, hide_index=True)
+        st.caption("💡 X低 可作為止損參考位：跌破 X低 = 型態失效，建議出場")
+
 
 # ── Tab 2：弱勢股 ─────────────────────────────────────
 with tab2:

@@ -196,6 +196,32 @@ def load_scores_history(days=30):
     return df
 
 
+def load_ohlcv_recent(days=90):
+    """讀取最近 N 個交易日的 OHLCV，供 N字反轉型態判斷
+    只讀取今日有評分記錄的股票，避免全市場載入太慢
+    """
+    conn = get_connection()
+    try:
+        df = pd.read_sql(f"""
+            SELECT dp.date, dp.code, dp.high, dp.low, dp.close
+            FROM daily_prices dp
+            WHERE dp.date IN (
+                SELECT DISTINCT date FROM daily_prices
+                ORDER BY date DESC
+                LIMIT {days}
+            )
+            AND dp.code IN (
+                SELECT DISTINCT code FROM daily_scores
+                WHERE date = (SELECT MAX(date) FROM daily_scores)
+            )
+            ORDER BY dp.date ASC
+        """, conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
 def load_price_history():
     """讀取股票歷史價格，供指標計算使用
     DEBUG_MODE = True 時只讀取調試清單中的股票
