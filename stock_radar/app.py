@@ -10,6 +10,64 @@ import streamlit.components.v1 as components
 import pandas as pd
 import subprocess
 from database import load_scores, load_scores_history, load_ohlcv_recent, has_data
+import base64
+
+
+def make_sparkline_svg(prices: list, width: int = 90, height: int = 38) -> str:
+    """純 SVG 走勢縮圖（上漲綠色 / 下跌紅色），無外部依賴"""
+    if len(prices) < 2:
+        return f'<svg width="{width}" height="{height}"></svg>'
+    mn, mx = min(prices), max(prices)
+    if mx == mn:
+        mn -= 0.01; mx += 0.01
+    px, py = 4, 4
+    w, h = width - px * 2, height - py * 2
+    n = len(prices)
+
+    def pt(i, p):
+        x = px + i / (n - 1) * w
+        y = py + (1 - (p - mn) / (mx - mn)) * h
+        return f'{x:.1f},{y:.1f}'
+
+    pts = ' '.join(pt(i, p) for i, p in enumerate(prices))
+    color = '#26a69a' if prices[-1] >= prices[0] else '#ef5350'
+    fill = f'{pts} {px + w:.1f},{py + h:.1f} {px:.1f},{py + h:.1f}'
+
+    return (
+        f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"'
+        f' style="vertical-align:middle">'
+        f'<rect width="{width}" height="{height}" rx="3" fill="#1a1a2e" opacity="0.8"/>'
+        f'<polygon points="{fill}" fill="{color}" opacity="0.2"/>'
+        f'<polyline points="{pts}" fill="none" stroke="{color}"'
+        f' stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>'
+        f'</svg>'
+    )
+
+
+def _svg_uri(svg: str) -> str:
+    return f'data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}'
+
+
+@st.cache_data(ttl=3600)
+def load_sparklines() -> dict:
+    """載入所有股票 90 天收盤價，回傳 {code: svg字串}，每小時更新一次"""
+    ohlcv = load_ohlcv_recent(days=90)
+    if ohlcv.empty:
+        return {}
+    result = {}
+    for code, grp in ohlcv.groupby('code'):
+        prices = grp.sort_values('date')['close'].dropna().tolist()
+        if len(prices) >= 5:
+            result[str(code)] = make_sparkline_svg(prices)
+    return result
+
+
+def with_sparks(orig: pd.DataFrame, disp: pd.DataFrame, sparks: dict) -> pd.DataFrame:
+    """在格式化後的 DataFrame 最前面插入走勢縮圖欄（data URI 格式）"""
+    out = disp.reset_index(drop=True).copy()
+    codes = orig.reset_index(drop=True)['code'].astype(str)
+    out.insert(0, '走勢', codes.map(lambda c: _svg_uri(sparks.get(c, make_sparkline_svg([])))))
+    return out
 
 
 @st.cache_data(ttl=3600)
@@ -34,7 +92,7 @@ st.set_page_config(
     page_title="台股全市場雷達",
     page_icon="📡",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown("""
@@ -45,53 +103,21 @@ st.markdown("""
     border-radius: 8px;
     padding: 12px;
 }
+[data-testid="collapsedControl"] { display: none; }
+section[data-testid="stSidebar"] { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────────────
-# 側邊欄
-# ──────────────────────────────────────────────────────
-with st.sidebar:
-    st.title("📡 台股雷達")
-    st.caption("每日盤後自動更新")
-    st.divider()
-
-    if st.button("🔄 立即更新數據", type="primary", use_container_width=True):
-        with st.spinner("正在抓取最新數據，請稍候（首次約 5~10 分鐘）..."):
-            result = subprocess.run(
-                ["python3", os.path.join(os.path.dirname(__file__), "update.py")],
-                capture_output=True, text=True
-            )
-        if result.returncode == 0:
-            st.success("✅ 更新完成！")
-            st.rerun()
-        else:
-            st.error("❌ 更新失敗，請查看終端機錯誤訊息")
-            st.code(result.stderr[-1000:])
-
-    st.divider()
-    st.markdown("**篩選設定**")
-    show_cats = st.multiselect(
-        "顯示狀態",
-        ["強勢", "中性", "弱勢"],
-        default=["強勢", "中性", "弱勢"],
-    )
-    min_score = st.slider("最低評分", 0, 100, 0, step=5)
-
-    st.divider()
-    st.markdown("""
-**評分說明**
-- 🔴 **強勢**：≥ 60 分
-- ⚪ **中性**：29~59 分
-- 💙 **弱勢**：≤ 28 分
-""")
+# 篩選條件固定為預設值（側邊欄已移除）
+show_cats = ["強勢", "中性", "弱勢"]
+min_score = 0
 
 # ──────────────────────────────────────────────────────
 # 資料未就緒
 # ──────────────────────────────────────────────────────
 if not has_data():
     st.title("📡 台股全市場雷達")
-    st.warning("⚠️  尚無資料，請點擊左側「立即更新數據」按鈕")
+    st.warning("⚠️  尚無資料，請點擊右上角「🔄 更新數據」按鈕")
     st.stop()
 
 # ──────────────────────────────────────────────────────
@@ -104,12 +130,29 @@ if df is None or df.empty:
 
 mask     = (df['category'].isin(show_cats)) & (df['score'] >= min_score)
 df_view  = df[mask].copy()
+sparklines = load_sparklines()
 
 # ──────────────────────────────────────────────────────
 # 標題與市場統計
 # ──────────────────────────────────────────────────────
 last_date = df['date'].iloc[0] if not df.empty else "—"
-st.title(f"📡 台股全市場雷達  ·  {last_date}")
+title_col, btn_col = st.columns([6, 1])
+with title_col:
+    st.title(f"📡 台股全市場雷達  ·  {last_date}")
+with btn_col:
+    st.write("")
+    if st.button("🔄 更新數據", type="primary", use_container_width=True):
+        with st.spinner("正在抓取最新數據，請稍候（首次約 5~10 分鐘）..."):
+            result = subprocess.run(
+                ["python3", os.path.join(os.path.dirname(__file__), "update.py")],
+                capture_output=True, text=True
+            )
+        if result.returncode == 0:
+            st.success("✅ 更新完成！")
+            st.rerun()
+        else:
+            st.error("❌ 更新失敗，請查看終端機錯誤訊息")
+            st.code(result.stderr[-1000:])
 
 total = len(df)
 c1, c2, c3, c4 = st.columns(4)
@@ -463,7 +506,7 @@ with tab0:
     rec_df = rec_df.sort_values('score', ascending=False).reset_index(drop=True)
 
     if rec_df.empty:
-        st.info("📭 今日尚無股票觸發買進訊號，或數據尚未更新。請先點擊左側「立即更新數據」。")
+        st.info("📭 今日尚無股票觸發買進訊號，或數據尚未更新。請先點擊右上角「🔄 更新數據」。")
     else:
         # ── 訊號統計列 ─────────────────────────────────
         all_signal_names = ['均線黃金交叉', '法人爆量買進', 'RSI低谷反轉', 'MACD翻紅']
@@ -518,7 +561,7 @@ with tab0:
             '<html><body style="margin:0;padding:0;background:transparent">',
             '<table style="width:100%;border-collapse:collapse;font-size:14px;color:#ddd">',
             '<thead><tr style="background:#1e1e2e;color:#aaa;text-align:left">',
-            f'{th}#</th>{th}代號</th>{th}名稱</th>',
+            f'{th}走勢</th>{th}#</th>{th}代號</th>{th}名稱</th>',
             f'{thr}收盤價</th>{thr}漲跌%</th>{thr}量比</th>',
             f'{thr}法人合計</th>{thr}連續買進</th>{thr}RSI</th>',
             f'{th}52週位置</th>{th}強弱</th>{th}狀態</th>{th}觸發訊號</th>{th}⚠️ 風險提示</th>',
@@ -535,8 +578,10 @@ with tab0:
             consec_c = '#66bb6a' if consec >= 3 else ('#ffb74d' if consec >= 1 else '#888')
             td       = f'style="padding:10px 8px;background:{bg}"'
             tdr      = f'style="padding:10px 8px;text-align:right;background:{bg}"'
+            spark    = sparklines.get(str(row['code']), make_sparkline_svg([]))
             html_parts.append(
                 f'<tr>'
+                f'<td style="padding:4px 6px;background:{bg}">{spark}</td>'
                 f'<td style="padding:10px 8px;background:{bg};color:#666">{n+1}</td>'
                 f'<td style="padding:10px 8px;background:{bg};font-weight:700;color:#ffd54f">{row["code"]}</td>'
                 f'<td {td}>{row.get("name","")}</td>'
@@ -568,7 +613,11 @@ with tab1:
     st.caption("評分 ≥ 60，技術面 + 法人全面偏多")
     strong_df = df_view[df_view['category'] == '強勢']
     if not strong_df.empty:
-        st.dataframe(fmt(strong_df), use_container_width=True, height=500, hide_index=True)
+        st.dataframe(
+            with_sparks(strong_df, fmt(strong_df), sparklines),
+            column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
+            use_container_width=True, height=500, hide_index=True,
+        )
         st.caption(f"共 {len(strong_df)} 支")
     else:
         st.info("今日無強勢股（或被篩選條件過濾）")
@@ -621,7 +670,11 @@ with tab1b:
         st.info("📭 今日無符合「強勢多頭回調整理」形態的股票（可能因盤整或資料不足）")
     else:
         st.caption(f"共篩選出 **{len(pullback_df)}** 支 ｜ 依評分高→低排序")
-        st.dataframe(fmt(pullback_df), use_container_width=True, height=520, hide_index=True)
+        st.dataframe(
+            with_sparks(pullback_df, fmt(pullback_df), sparklines),
+            column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
+            use_container_width=True, height=520, hide_index=True,
+        )
         st.caption("💡 建議搭配「今日推薦」頁面確認是否同時觸發買進訊號，雙重確認後再進場評估")
 
 # ── Tab 1c：N字反轉 ───────────────────────────────────
@@ -710,19 +763,18 @@ N字反轉是一種**下跌段後的突破型態**，形狀像英文字母 N：
         n_df['X低']    = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_low', ''))
         n_df['X跌幅%'] = n_df['code'].map(lambda c: n_details.get(c, {}).get('decline_pct', ''))
         n_df['突破後漲%'] = n_df['code'].map(lambda c: n_details.get(c, {}).get('break_pct', ''))
-        n_df = n_df.sort_values('突破後漲%')  # 突破幅度小的排前面（剛突破，機會更好）
+        n_df = n_df.sort_values('score', ascending=False)
 
     if n_df.empty:
         st.info("📭 今日無符合「N字反轉突破」型態的股票（可能因資料不足或市場無此結構）")
     else:
-        st.caption(f"共篩選出 **{len(n_df)}** 支 ｜ 依突破後漲幅由小→大排序（剛突破的排前面）")
-
-        # 顯示含 X段資訊的表格
-        show_cols = ['code', 'name', 'close', 'change_pct', 'volume', 'vol_ratio',
-                     'X高', 'X低', 'X跌幅%', '突破後漲%', 'score', 'signals']
-        avail_cols = [c for c in show_cols if c in n_df.columns]
-        st.dataframe(n_df[avail_cols].reset_index(drop=True), use_container_width=True, height=520, hide_index=True)
-        st.caption("💡 X低 可作為止損參考位：跌破 X低 = 型態失效，建議出場")
+        st.caption(f"共篩選出 **{len(n_df)}** 支 ｜ 依評分高→低排序")
+        st.dataframe(
+            with_sparks(n_df, fmt(n_df), sparklines),
+            column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
+            use_container_width=True, height=520, hide_index=True,
+        )
+        st.caption("💡 N字反轉：股價突破前波高點，訊號有效期間請留意是否跌破底部")
 
 
 # ── Tab 2：弱勢股 ─────────────────────────────────────
@@ -731,7 +783,11 @@ with tab2:
     st.caption("評分 ≤ 28，技術面 + 法人全面偏空，建議觀望")
     weak_df = df_view[df_view['category'] == '弱勢']
     if not weak_df.empty:
-        st.dataframe(fmt(weak_df), use_container_width=True, height=500, hide_index=True)
+        st.dataframe(
+            with_sparks(weak_df, fmt(weak_df), sparklines),
+            column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
+            use_container_width=True, height=500, hide_index=True,
+        )
         st.caption(f"共 {len(weak_df)} 支")
     else:
         st.info("今日無弱勢股（或被篩選條件過濾）")
@@ -761,7 +817,11 @@ with tab3:
     }
     search_df = search_df.sort_values(sort_map[sort_by], ascending=False)
 
-    st.dataframe(fmt(search_df), use_container_width=True, height=550, hide_index=True)
+    st.dataframe(
+        with_sparks(search_df, fmt(search_df), sparklines),
+        column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
+        use_container_width=True, height=550, hide_index=True,
+    )
     st.caption(f"顯示 {len(search_df)} 支股票")
 
 # ── Tab 4：市場分析 ───────────────────────────────────
