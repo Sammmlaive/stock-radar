@@ -768,24 +768,24 @@ with tab3:
 with tab4:
     st.markdown("### 📊 今日市場強弱分佈")
 
-    import altair as alt
+    import plotly.graph_objects as go
     cat_order = ['強勢', '中性', '弱勢']
-    cat_color = {
-        '強勢': '#ff4b4b', '中性': '#888888', '弱勢': '#0066cc',
-    }
+    cat_color = {'強勢': '#ff4b4b', '中性': '#888888', '弱勢': '#0066cc'}
     dist = df.groupby('category').size().reset_index(name='數量')
     dist['category'] = pd.Categorical(dist['category'], categories=cat_order, ordered=True)
     dist = dist.sort_values('category')
 
-    bar = alt.Chart(dist).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-        x=alt.X('category:N', sort=cat_order, title='狀態', axis=alt.Axis(labelFontSize=14)),
-        y=alt.Y('數量:Q', title='股票數量'),
-        color=alt.Color('category:N',
-                        scale=alt.Scale(domain=cat_order, range=list(cat_color.values())),
-                        legend=None),
-        tooltip=['category', '數量'],
-    ).properties(height=300)
-    st.altair_chart(bar, use_container_width=True)
+    bar_fig = go.Figure(go.Bar(
+        x=dist['category'],
+        y=dist['數量'],
+        marker_color=[cat_color.get(c, '#888888') for c in dist['category']],
+        text=dist['數量'],
+        textposition='outside',
+    ))
+    bar_fig.update_layout(height=320, showlegend=False,
+                          xaxis_title='狀態', yaxis_title='股票數量',
+                          margin=dict(t=20, b=20))
+    st.plotly_chart(bar_fig, use_container_width=True)
 
     st.markdown("### 📋 法人籌碼統計（5日累計）")
     stat_cols = st.columns(3)
