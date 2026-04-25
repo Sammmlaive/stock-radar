@@ -176,6 +176,26 @@ def load_scores():
     return df
 
 
+def load_scores_history(days=30):
+    """讀取最近 N 個交易日的評分歷史，供形態判斷使用"""
+    conn = get_connection()
+    try:
+        df = pd.read_sql(f"""
+            SELECT date, code, close, ma20, ma60, rsi, vol_ratio
+            FROM daily_scores
+            WHERE date IN (
+                SELECT DISTINCT date FROM daily_scores
+                ORDER BY date DESC
+                LIMIT {days}
+            )
+            ORDER BY date ASC
+        """, conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
 def load_price_history():
     """讀取股票歷史價格，供指標計算使用
     DEBUG_MODE = True 時只讀取調試清單中的股票

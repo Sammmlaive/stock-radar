@@ -9,7 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import subprocess
-from database import load_scores, has_data
+from database import load_scores, load_scores_history, has_data
 
 
 @st.cache_data(ttl=3600)
@@ -175,9 +175,72 @@ def fmt(data: pd.DataFrame) -> pd.DataFrame:
     return d
 
 # ──────────────────────────────────────────────────────
+# 回調整理形態判斷（需要30天歷史，網頁即時計算）
+# ──────────────────────────────────────────────────────
+
+def classify_pullback(hist: pd.DataFrame) -> bool:
+    """
+    判斷是否符合「強勢多頭回調至 MA20」形態
+    hist: 某支股票最近 30 天的歷史記錄（已按日期升冪排列）
+    全部 6 個條件都成立才回傳 True
+    """
+    if len(hist) < 20:
+        return False
+
+    latest = hist.iloc[-1]
+
+    def sv(key, default=0):
+        v = latest.get(key, default)
+        try:
+            f = float(v)
+            return default if (f != f) else f  # NaN check
+        except (TypeError, ValueError):
+            return default
+
+    ma20  = sv('ma20')
+    ma60  = sv('ma60')
+    close = sv('close')
+    rsi   = sv('rsi', 50)
+    vol_r = sv('vol_ratio', 1)
+
+    if ma20 <= 0 or ma60 <= 0 or close <= 0:
+        return False
+
+    # 1. 多頭排列：MA20 > MA60
+    if ma20 <= ma60:
+        return False
+
+    # 2. 過去 N 天有足夠的多頭基礎（≥50% 天數站上 MA20）
+    above = sum(
+        1 for _, r in hist.iterrows()
+        if (r.get('close') or 0) > (r.get('ma20') or 0) > 0
+    )
+    if above < len(hist) * 0.5:
+        return False
+
+    # 3. 近期有實質漲幅後回調（30天高點 > 現價 × 1.05）
+    if hist['close'].max() < close * 1.05:
+        return False
+
+    # 4. 現在靠近 MA20（距離 ≤ 3%）
+    if abs(close - ma20) / ma20 > 0.03:
+        return False
+
+    # 5. RSI 在健康整理區間（35~65），排除崩跌或超買
+    if not (35 <= rsi <= 65):
+        return False
+
+    # 6. 非爆量殺跌（量比 ≤ 2.5）
+    if vol_r > 2.5:
+        return False
+
+    return True
+
+
+# ──────────────────────────────────────────────────────
 # 分頁
 # ──────────────────────────────────────────────────────
-tab0, tab1, tab2, tab3, tab4 = st.tabs(["🎯 今日推薦", "🔴 強勢股", "💙 弱勢股", "🔍 全部股票", "📊 市場分析"])
+tab0, tab1, tab1b, tab2, tab3, tab4 = st.tabs(["🎯 今日推薦", "🔴 強勢股", "📉 回調整理", "💙 弱勢股", "🔍 全部股票", "📊 市場分析"])
 
 # ── Tab 0：今日推薦 ───────────────────────────────────
 with tab0:
@@ -187,29 +250,128 @@ with tab0:
     if 'buy_signals' not in df.columns:
         df['buy_signals'] = ''
 
-    # 訊號顏色與圖示
+    # 訊號顏色、圖示、hover 說明
     SIGNAL_STYLE = {
-        '均線黃金交叉': ('#1b5e20', '#e8f5e9', '📈'),
-        '法人爆量買進': ('#7f4500', '#fff3e0', '💰'),
-        'RSI低谷反轉':  ('#0d47a1', '#e3f2fd', '🔄'),
-        'MACD翻紅':     ('#b71c1c', '#ffebee', '🔴'),
+        '均線黃金交叉': ('#1b5e20', '#e8f5e9', '📈',
+                        'MA5（5日均線）今日向上穿越 MA20（20日均線）\n'
+                        '條件：今日 MA5 > MA20，且昨日 MA5 ≤ MA20\n'
+                        '意義：短期持倉成本剛穿越中期，趨勢翻多第一天'),
+        '法人爆量買進': ('#7f4500', '#fff3e0', '💰',
+                        '三大法人（外資+投信+自營）合計淨買超 > 3,000 張\n'
+                        '且今日量比（今量/均量）> 1.5 倍\n'
+                        '意義：大資金大量湧入，市場同步放量確認'),
+        'RSI低谷反轉':  ('#0d47a1', '#e3f2fd', '🔄',
+                        '前日 RSI < 30（超賣區）→ 今日 RSI > 35\n'
+                        '意義：從超賣區成功反彈，賣壓結束、買盤正式接手'),
+        'MACD翻紅':     ('#b71c1c', '#ffebee', '🔴',
+                        '前日 MACD 柱狀體 < 0（空方動能）→ 今日 > 0（多方動能）\n'
+                        '意義：短期動能從空翻多的轉折點'),
     }
 
     def signal_badges(signal_str: str) -> str:
-        """把訊號字串轉成彩色 HTML 標籤"""
+        """把訊號字串轉成彩色 HTML 標籤（含 hover 說明）"""
         if not signal_str:
             return '—'
         badges = []
         for sig in signal_str.split('、'):
             sig = sig.strip()
             if sig in SIGNAL_STYLE:
-                fg, bg, icon = SIGNAL_STYLE[sig]
+                fg, bg, icon, tip = SIGNAL_STYLE[sig]
+                tip_escaped = tip.replace('"', '&quot;')
                 badges.append(
-                    f'<span style="background:{bg};color:{fg};border:1px solid {fg};'
+                    f'<span title="{tip_escaped}" style="background:{bg};color:{fg};border:1px solid {fg};'
                     f'padding:3px 10px;border-radius:20px;font-size:12px;'
-                    f'font-weight:600;white-space:nowrap;margin:2px;display:inline-block">'
+                    f'font-weight:600;white-space:nowrap;margin:2px;display:inline-block;cursor:help">'
                     f'{icon} {sig}</span>'
                 )
+        return ' '.join(badges)
+
+    def compute_risks(row) -> list:
+        """分析各項指標，回傳風險警示清單 [(名稱, hover說明), ...]"""
+        risks = []
+        vol_ratio  = float(row.get('vol_ratio',  1) or 1)
+        rsi        = float(row.get('rsi',        50) or 50)
+        week52_pos = float(row.get('week52_pos',  0) or 0)
+        total_net  = float(row.get('total_net',   0) or 0)
+        change_pct = float(row.get('change_pct',  0) or 0)
+        k_val      = float(row.get('k',           50) or 50)
+        volume     = float(row.get('volume',       0) or 0)
+        sigs       = row.get('buy_signals', '') or ''
+
+        if vol_ratio < 0.8:
+            risks.append(('量能嚴重不足',
+                          f'量比={vol_ratio:.2f}，今日成交量僅為均量的 {vol_ratio*100:.0f}%\n'
+                          '無量突破容易拉高出貨，訊號可信度極低'))
+        elif vol_ratio < 1.0 and ('均線黃金交叉' in sigs or 'MACD翻紅' in sigs):
+            risks.append(('量能偏弱',
+                          f'量比={vol_ratio:.2f}，均線交叉 / MACD 翻紅未配合放量\n'
+                          '有效突破需量比 > 1.5，建議等放量再確認'))
+
+        if rsi > 80:
+            risks.append(('RSI嚴重超買',
+                          f'RSI={rsi:.1f}，已進入嚴重超買區（>80）\n'
+                          '短線拉回機率高，追高容易被套'))
+        elif rsi > 72:
+            risks.append(('RSI偏高',
+                          f'RSI={rsi:.1f}，偏高（>72），動能未退但追高風險升溫\n'
+                          '建議等回測均線再進場'))
+
+        if week52_pos >= 90:
+            risks.append(('接近年度高點',
+                          f'股價位於52週區間 {week52_pos:.0f}% 高位\n'
+                          '上方空間有限、歷史壓力強，追高回撤風險大'))
+        elif week52_pos >= 80:
+            risks.append(('位於高位區間',
+                          f'股價位於52週區間 {week52_pos:.0f}%\n'
+                          '需留意高檔套牢壓力，停損點設置要精確'))
+
+        if total_net < -1000:
+            risks.append(('法人大幅賣出',
+                          f'三大法人今日合計賣出 {abs(total_net):.0f} 張\n'
+                          '技術訊號出現但大資金正在撤離，方向矛盾，風險高'))
+        elif total_net < 0:
+            risks.append(('法人小幅賣出',
+                          f'法人今日賣出 {abs(total_net):.0f} 張\n'
+                          '建議觀察是否連續賣出，籌碼流向存疑'))
+
+        if change_pct >= 6:
+            risks.append(('漲幅過大慎追',
+                          f'今日漲幅 +{change_pct:.1f}%，接近漲停\n'
+                          '追高風險極高，隔日開低機率大，建議等回測'))
+        elif change_pct >= 4:
+            risks.append(('漲幅偏大',
+                          f'今日漲幅 +{change_pct:.1f}%\n'
+                          '短線追高需謹慎，建議等拉回 MA5 附近再評估'))
+
+        if k_val > 90:
+            risks.append(('KD嚴重超買',
+                          f'K值={k_val:.0f}，KD 嚴重超買（>90）\n'
+                          '短線死叉風險高，急漲後容易急跌'))
+        elif k_val > 80:
+            risks.append(('KD進入超買',
+                          f'K值={k_val:.0f}，KD 超買區間（>80）\n'
+                          '動能雖強但短線壓力加大'))
+
+        if 0 < volume < 200:
+            risks.append(('流動性不足',
+                          f'今日僅成交 {volume:.0f} 張\n'
+                          '冷門股買賣價差大，難以在理想價位成交或出場'))
+
+        return risks
+
+    def risk_badges(risk_list: list) -> str:
+        """把風險清單轉成 HTML 警示標籤"""
+        if not risk_list:
+            return '<span style="color:#66bb6a;font-size:12px;font-weight:600">✅ 無明顯風險</span>'
+        badges = []
+        for name, tip in risk_list:
+            tip_esc = tip.replace('"', '&quot;')
+            badges.append(
+                f'<span title="{tip_esc}" style="background:#fff3e0;color:#e65100;'
+                f'border:1px solid #ff9800;padding:2px 8px;border-radius:12px;'
+                f'font-size:12px;font-weight:600;white-space:nowrap;margin:2px;'
+                f'display:inline-block;cursor:help">⚠️ {name}</span>'
+            )
         return ' '.join(badges)
 
     rec_df = df[df['buy_signals'].notna() & (df['buy_signals'] != '')].copy()
@@ -223,8 +385,8 @@ with tab0:
         stat_cols = st.columns(4)
         for i, sig in enumerate(all_signal_names):
             count = rec_df['buy_signals'].str.contains(sig, na=False).sum()
-            _, _, icon = SIGNAL_STYLE[sig]
-            stat_cols[i].metric(f"{icon} {sig}", f"{count} 支")
+            _, _, icon, tip = SIGNAL_STYLE[sig]
+            stat_cols[i].metric(f"{icon} {sig}", f"{count} 支", help=tip)
 
         st.divider()
 
@@ -274,13 +436,14 @@ with tab0:
             f'{th}#</th>{th}代號</th>{th}名稱</th>',
             f'{thr}收盤價</th>{thr}漲跌%</th>{thr}量比</th>',
             f'{thr}法人合計</th>{thr}連續買進</th>{thr}RSI</th>',
-            f'{th}52週位置</th>{th}強弱</th>{th}狀態</th>{th}觸發訊號</th>',
+            f'{th}52週位置</th>{th}強弱</th>{th}狀態</th>{th}觸發訊號</th>{th}⚠️ 風險提示</th>',
             '</tr></thead><tbody>',
         ]
 
         for n, (_, row) in enumerate(rec_df.iterrows()):
             chg      = row.get('change_pct', 0) or 0
             chg_clr  = '#ef5350' if chg > 0 else ('#42a5f5' if chg < 0 else '#aaa')
+            risks    = compute_risks(row)
             bg       = '#16161e' if n % 2 == 0 else '#1a1a28'
             consec   = int(row.get('inst_consec', 0) or 0)
             consec_s = f'{consec}天' if consec > 0 else '—'
@@ -302,6 +465,7 @@ with tab0:
                 f'<td {td}>{strength_badge(row.get("signal_strength",""))}</td>'
                 f'<td {td}>{cat_badge(row.get("category",""))}</td>'
                 f'<td {td}>{signal_badges(row.get("buy_signals",""))}</td>'
+                f'<td {td}>{risk_badges(risks)}</td>'
                 f'</tr>'
             )
 
@@ -323,6 +487,57 @@ with tab1:
         st.caption(f"共 {len(strong_df)} 支")
     else:
         st.info("今日無強勢股（或被篩選條件過濾）")
+
+# ── Tab 1b：回調整理 ──────────────────────────────────
+with tab1b:
+    st.markdown("### 📉 強勢多頭回調整理")
+
+    with st.expander("📖 什麼是「回調整理」？篩選邏輯說明（點擊展開）", expanded=True):
+        st.markdown("""
+**概念說明**
+
+這類股票的特徵：趨勢結構完好的多頭股，因短線獲利了結而**回落到 MA20（20日均線）附近整理**。
+
+這是一個相對低風險的進場等待位——趨勢沒有壞掉，只是暫時休息補充能量。
+
+> 類比：好股票就像馬拉松選手，偶爾需要放慢腳步補水（回調到均線），而不是一路衝刺到崩潰。
+
+---
+
+**系統篩選條件（6 項全部符合才納入）**
+
+| # | 條件 | 門檻 | 為什麼重要 |
+|---|------|------|----------|
+| 1 | **多頭排列** | 今日 MA20 > MA60 | 確認整體趨勢結構沒有壞掉 |
+| 2 | **有多頭基礎** | 過去 30 天中，≥ 50% 天數收盤站上 MA20 | 不是剛起步的弱股，是真正在上漲中的股票 |
+| 3 | **有實質回調幅度** | 30天內最高點 > 現價 × 1.05 | 確認是從高點拉回（微小波動不算），有買點意義 |
+| 4 | **靠近均線支撐** | 收盤與 MA20 距離 ≤ 3% | 正在回到均線附近，是歷史上容易獲得支撐的價位 |
+| 5 | **RSI 合理** | 35 ≤ RSI ≤ 65 | 排除兩種危險：崩跌中（RSI<35）或追高（RSI>65） |
+| 6 | **非爆量殺跌** | 量比 ≤ 2.5 | 爆量下跌代表有人在急拋，縮量整理才健康 |
+
+> ⚠️ **重要提醒**：符合此形態**不代表可以馬上買進**。建議等待額外確認訊號，例如：
+> - 出現止跌 K 棒（長下影線、吞噬、錘子線）
+> - 量能回升（量比 > 1.2）
+> - 搭配「今日推薦」頁面的買進訊號同時出現
+""")
+
+    # 計算符合形態的股票
+    hist_df = load_scores_history(days=30)
+    pullback_codes = []
+    if not hist_df.empty:
+        for code, grp in hist_df.groupby('code'):
+            if classify_pullback(grp.sort_values('date').reset_index(drop=True)):
+                pullback_codes.append(code)
+
+    pullback_df = df[df['code'].isin(pullback_codes)].copy()
+    pullback_df = pullback_df.sort_values('score', ascending=False)
+
+    if pullback_df.empty:
+        st.info("📭 今日無符合「強勢多頭回調整理」形態的股票（可能因盤整或資料不足）")
+    else:
+        st.caption(f"共篩選出 **{len(pullback_df)}** 支 ｜ 依評分高→低排序")
+        st.dataframe(fmt(pullback_df), use_container_width=True, height=520, hide_index=True)
+        st.caption("💡 建議搭配「今日推薦」頁面確認是否同時觸發買進訊號，雙重確認後再進場評估")
 
 # ── Tab 2：弱勢股 ─────────────────────────────────────
 with tab2:
