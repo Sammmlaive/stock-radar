@@ -8,7 +8,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import subprocess
 from database import load_scores, load_scores_history, load_ohlcv_recent, has_data
 import base64
 
@@ -117,7 +116,7 @@ min_score = 0
 # ──────────────────────────────────────────────────────
 if not has_data():
     st.title("📡 台股全市場雷達")
-    st.warning("⚠️  尚無資料，請點擊右上角「🔄 更新數據」按鈕")
+    st.warning("⚠️  尚無資料，系統每日下午 3:35 自動更新，請稍後再試")
     st.stop()
 
 # ──────────────────────────────────────────────────────
@@ -136,23 +135,8 @@ sparklines = load_sparklines()
 # 標題與市場統計
 # ──────────────────────────────────────────────────────
 last_date = df['date'].iloc[0] if not df.empty else "—"
-title_col, btn_col = st.columns([6, 1])
-with title_col:
-    st.title(f"📡 台股全市場雷達  ·  {last_date}")
-with btn_col:
-    st.write("")
-    if st.button("🔄 更新數據", type="primary", use_container_width=True):
-        with st.spinner("正在抓取最新數據，請稍候（首次約 5~10 分鐘）..."):
-            result = subprocess.run(
-                ["python3", os.path.join(os.path.dirname(__file__), "update.py")],
-                capture_output=True, text=True
-            )
-        if result.returncode == 0:
-            st.success("✅ 更新完成！")
-            st.rerun()
-        else:
-            st.error("❌ 更新失敗，請查看終端機錯誤訊息")
-            st.code(result.stderr[-1000:])
+st.title(f"📡 台股全市場雷達  ·  {last_date}")
+st.caption("📅 資料每日下午 3:35 盤後自動更新")
 
 total = len(df)
 c1, c2, c3, c4 = st.columns(4)
@@ -181,16 +165,12 @@ st.divider()
 
 _COLS = ['code', 'name', 'close', 'change_pct', 'volume',
          'ma20', 'ma60',
-         'foreign_net', 'foreign_3d', 'foreign_5d',
-         'trust_net',   'trust_3d',   'trust_5d',
          'total_net',   'total_3d',   'total_5d',
          'rsi', 'k', 'd', 'vol_ratio',
          'score', 'category', 'signals']
 
 _LABELS = ['代號', '名稱', '收盤價', '漲跌%', '成交量(張)',
            'MA20', 'MA60',
-           '外資(今)', '外資(3日)', '外資(5日)',
-           '投信(今)', '投信(3日)', '投信(5日)',
            '法人合計(今)', '法人合計(3日)', '法人合計(5日)',
            'RSI', 'K值', 'D值', '量比',
            '評分', '狀態', '訊號']
@@ -209,9 +189,7 @@ def fmt(data: pd.DataFrame) -> pd.DataFrame:
     # 成交量：轉成整數（單位：張，比較好讀）
     if '成交量(張)' in d.columns:
         d['成交量(張)'] = d['成交量(張)'].fillna(0).astype(int)
-    inst_cols = ['外資(今)', '外資(3日)', '外資(5日)',
-                 '投信(今)', '投信(3日)', '投信(5日)',
-                 '法人合計(今)', '法人合計(3日)', '法人合計(5日)']
+    inst_cols = ['法人合計(今)', '法人合計(3日)', '法人合計(5日)']
     for col in inst_cols:
         if col in d.columns:
             d[col] = d[col].fillna(0).astype(int)
@@ -800,7 +778,7 @@ with tab3:
     with row1[0]:
         keyword = st.text_input("輸入股票代號或名稱關鍵字", placeholder="例：台積電、2330、金融...")
     with row1[1]:
-        sort_by = st.selectbox("排序方式", ["評分（高→低）", "漲跌%（高→低）", "量比（高→低）", "外資買超（高→低）", "法人合計5日（高→低）"])
+        sort_by = st.selectbox("排序方式", ["評分（高→低）", "漲跌%（高→低）", "量比（高→低）", "法人合計5日（高→低）"])
 
     search_df = df_view.copy()
     if keyword:
@@ -812,7 +790,6 @@ with tab3:
         "評分（高→低）":        'score',
         "漲跌%（高→低）":       'change_pct',
         "量比（高→低）":        'vol_ratio',
-        "外資買超（高→低）":    'foreign_net',
         "法人合計5日（高→低）": 'total_5d',
     }
     search_df = search_df.sort_values(sort_map[sort_by], ascending=False)
