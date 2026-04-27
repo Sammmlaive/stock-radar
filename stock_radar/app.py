@@ -820,8 +820,14 @@ N字反轉形狀像英文字母 N，分為兩個階段：
         st.info("📭 今日無符合「剛突破X高點」型態的股票")
     else:
         st.caption(f"共篩選出 **{len(n_df)}** 支 ｜ 依評分高→低排序")
+        _disp_n = fmt(n_df).reset_index(drop=True)
+        _orig_n = n_df.reset_index(drop=True)
+        if 'X高' in _orig_n.columns and 'MA60' in _disp_n.columns:
+            _pos = _disp_n.columns.get_loc('MA60') + 1
+            _disp_n.insert(_pos,     'X高', _orig_n['X高'])
+            _disp_n.insert(_pos + 1, 'X低', _orig_n['X低'])
         st.dataframe(
-            with_sparks(n_df, fmt(n_df), sparklines),
+            with_sparks(n_df, _disp_n, sparklines),
             column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
             use_container_width=True, height=400, hide_index=True,
         )
@@ -868,8 +874,14 @@ N字反轉形狀像英文字母 N，分為兩個階段：
         st.info("📭 今日無股票進入黃金買入區（N字突破後尚未回跌到 50% 位置，或已跌破出局水位）")
     else:
         st.caption(f"共篩選出 **{len(g_df)}** 支 ｜ 依評分高→低排序")
+        _disp_g = fmt(g_df).reset_index(drop=True)
+        _orig_g = g_df.reset_index(drop=True)
+        if 'X高' in _orig_g.columns and 'MA60' in _disp_g.columns:
+            _pos = _disp_g.columns.get_loc('MA60') + 1
+            _disp_g.insert(_pos,     'X高', _orig_g['X高'])
+            _disp_g.insert(_pos + 1, 'X低', _orig_g['X低'])
         st.dataframe(
-            with_sparks(g_df, fmt(g_df), sparklines),
+            with_sparks(g_df, _disp_g, sparklines),
             column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
             use_container_width=True, height=400, hide_index=True,
         )
