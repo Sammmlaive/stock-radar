@@ -343,6 +343,91 @@ def classify_n_reversal(hist: pd.DataFrame):
     return None
 
 
+def classify_golden_zone(hist: pd.DataFrame):
+    """
+    N字反轉後「黃金買入區」偵測
+
+    邏輯：
+      1. 找到 X 段（同 N字反轉：明確下跌結構，幅度 ≥ 5%）
+      2. X 段結束後，股價曾突破 X 高點（N字型態已完成）
+      3. 現在股價「回跌」至黃金區間：
+           x_low < 收盤 ≤ 50%水位（= x_low + x_height × 0.5）
+      4. 尚未跌破出局水位（= x_low - x_height × 0.5）
+
+    範例：X高=650、X低=550（X高度100點）
+      → 50%水位 = 600、出局水位 = 500
+      → 黃金區 = 收盤在 500～600 之間
+    """
+    needed = {'high', 'low', 'close'}
+    if len(hist) < 20 or not needed.issubset(hist.columns):
+        return None
+
+    hist = hist.sort_values('date').reset_index(drop=True)
+    n = len(hist)
+    closes = hist['close'].values
+    highs  = hist['high'].values
+    lows   = hist['low'].values
+
+    latest_close = closes[-1]
+    latest_low   = lows[-1]
+
+    pivot_len = 3
+
+    for i in range(pivot_len, n - pivot_len - 5):
+        # 判斷是否為波段高點（左右各 3 根都更低）
+        left_ok  = all(highs[i] > highs[i - k] for k in range(1, pivot_len + 1))
+        right_ok = all(highs[i] > highs[i + k] for k in range(1, pivot_len + 1))
+        if not (left_ok and right_ok):
+            continue
+
+        pivot_high = highs[i]
+
+        # X 段底部：高點之後到近 5 根K線前的最低點
+        search_lows = lows[i + 1: n - 5]
+        if len(search_lows) < 3:
+            continue
+        x_low_rel = int(search_lows.argmin())
+        x_low     = float(search_lows[x_low_rel])
+        x_low_abs = i + 1 + x_low_rel
+
+        # X 高度須 ≥ 5%
+        x_height = pivot_high - x_low
+        if x_height < pivot_high * 0.05:
+            continue
+
+        # X 底部前，收盤從未超過高點（確認是真實阻力）
+        pre = closes[i + 1: x_low_abs + 1]
+        if len(pre) > 0 and float(max(pre)) >= pivot_high:
+            continue
+
+        # X 底部後，至少有一天收盤突破高點（N字型態已完成）
+        post = closes[x_low_abs + 1:]
+        if not any(c > pivot_high for c in post):
+            continue
+
+        # 計算黃金區間
+        fifty_pct  = x_low + x_height * 0.5   # 50%水位（黃金區上緣）
+        exit_level = x_low - x_height * 0.5   # 出局水位（跌破此處認定出局）
+
+        # 現在股價必須在黃金區內：exit_level < 收盤 ≤ 50%水位
+        if latest_close > fifty_pct:
+            continue   # 尚未回跌到黃金區
+        if latest_close <= exit_level:
+            continue   # 已跌破出局水位
+        if latest_low <= exit_level:
+            continue   # 今日低點觸碰出局線
+
+        return {
+            'x_high':     round(pivot_high, 2),
+            'x_low':      round(x_low, 2),
+            '50%水位':    round(fifty_pct, 2),
+            '出局水位':   round(exit_level, 2),
+            'X跌幅%':     round(x_height / pivot_high * 100, 1),
+        }
+
+    return None
+
+
 # ──────────────────────────────────────────────────────
 # 分頁
 # ──────────────────────────────────────────────────────
@@ -541,8 +626,8 @@ with tab0:
             '<thead><tr style="background:#1e1e2e;color:#aaa;text-align:left">',
             f'{th}走勢</th>{th}#</th>{th}代號</th>{th}名稱</th>',
             f'{thr}收盤價</th>{thr}漲跌%</th>{thr}量比</th>',
-            f'{thr}法人合計</th>{thr}連續買進</th>{thr}RSI</th>',
-            f'{th}52週位置</th>{th}強弱</th>{th}狀態</th>{th}觸發訊號</th>{th}⚠️ 風險提示</th>',
+            f'{thr}法人合計</th>{thr}連續買進</th>',
+            f'{th}52週位置</th>{th}狀態</th>{th}觸發訊號</th>{th}⚠️ 風險提示</th>',
             '</tr></thead><tbody>',
         ]
 
@@ -568,9 +653,7 @@ with tab0:
                 f'<td {tdr}>{row.get("vol_ratio",0):.2f}</td>'
                 f'<td {tdr}>{int(row.get("total_net",0) or 0):,}</td>'
                 f'<td style="padding:10px 8px;text-align:right;background:{bg};color:{consec_c};font-weight:600">{consec_s}</td>'
-                f'<td {tdr}>{row.get("rsi",0):.1f}</td>'
                 f'<td {td}>{pos_badge(row.get("week52_pos"))}</td>'
-                f'<td {td}>{strength_badge(row.get("signal_strength",""))}</td>'
                 f'<td {td}>{cat_badge(row.get("category",""))}</td>'
                 f'<td {td}>{signal_badges(row.get("buy_signals",""))}</td>'
                 f'<td {td}>{risk_badges(risks)}</td>'
@@ -588,15 +671,34 @@ with tab0:
 # ── Tab 1：強勢股 ─────────────────────────────────────
 with tab1:
     st.markdown("### 🔴 強勢股")
-    st.caption("評分 ≥ 60，技術面 + 法人全面偏多")
+    st.caption("評分 ≥ 60（滿分 100 分），技術面 + 法人籌碼全面偏多")
+
+    with st.expander("📊 評分組成說明（點擊展開）", expanded=False):
+        st.markdown("""
+| 評分項目 | 滿分 | 評分邏輯 |
+|---------|------|---------|
+| **技術面** | 40分 | 收盤站上MA20（+15）、MA20>MA60多頭排列（+10）、RSI強弱（最高+15）、MACD轉正（+5） |
+| **量能** | 20分 | 量比 ≥ 2.0（+20）、≥ 1.5（+12）、≥ 1.2（+6）、< 0.5（-5） |
+| **法人籌碼** | 40分 | 三大法人合計淨買 > 10,000張（+40）、> 3,000張（+28）、> 500張（+16）、> 0（+6） |
+
+> 強勢 = **60分以上**；弱勢 = **28分以下**；中性 = 29～59分
+""")
+
     strong_df = df_view[df_view['category'] == '強勢']
     if not strong_df.empty:
+        score_min = int(strong_df['score'].min())
+        score_max = int(strong_df['score'].max())
+        score_avg = round(strong_df['score'].mean(), 1)
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("最高評分", f"{score_max} 分")
+        sc2.metric("平均評分", f"{score_avg} 分")
+        sc3.metric("最低評分", f"{score_min} 分")
         st.dataframe(
             with_sparks(strong_df, fmt(strong_df), sparklines),
             column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
             use_container_width=True, height=500, hide_index=True,
         )
-        st.caption(f"共 {len(strong_df)} 支")
+        st.caption(f"共 {len(strong_df)} 支（評分 {score_min}～{score_max} 分）")
     else:
         st.info("今日無強勢股（或被篩選條件過濾）")
 
@@ -657,79 +759,152 @@ with tab1b:
 
 # ── Tab 1c：N字反轉 ───────────────────────────────────
 with tab1c:
-    st.markdown("### 🔼 N字反轉突破")
+    st.markdown("### 🔼 N字反轉")
 
-    with st.expander("📖 什麼是「N字反轉」？篩選邏輯說明（點擊展開）", expanded=True):
+    with st.expander("📖 型態圖示說明（點擊展開）", expanded=False):
         st.markdown("""
-**概念說明**
-
-N字反轉是一種**下跌段後的突破型態**，形狀像英文字母 N：
+N字反轉形狀像英文字母 N，分為兩個階段：
 
 ```
 價格
  ↑
- │  X高(起點)─────────────────── 突破！（今日位置）
+ │  X高(起點)──────────────────── 突破！→ 第一區塊
  │      ╲                       ╱
  │       ╲    X段（下跌）      ╱
  │        ╲                  ╱
- │         X低(底部)────────╱
+ │  50%水位 ╲──────────────── → 黃金買入區（回跌到此出現訊號）
+ │         X低(底部)
+ │  出局水位 ─────────────────── → 跌破此處訊號失效
  │
  └──────────────────────────────────────→ 時間
 ```
 """)
 
-    # ── 計算 N字反轉 ──
+    # ── 同時掃描兩種型態（共用一次載入 ohlcv）──
     @st.cache_data(ttl=1800, show_spinner=False)
     def get_n_reversal_results():
         ohlcv_df = load_ohlcv_recent(days=90)
         if ohlcv_df.empty:
-            return [], {}
-        results = []
-        details = {}
+            return [], {}, [], {}
+        n_codes, n_details, g_codes, g_details = [], {}, [], {}
         for code, grp in ohlcv_df.groupby('code'):
-            info = classify_n_reversal(grp.sort_values('date').reset_index(drop=True))
+            hist = grp.sort_values('date').reset_index(drop=True)
+            info = classify_n_reversal(hist)
             if info is not None:
-                results.append(code)
-                details[code] = info
-        return results, details
+                n_codes.append(code)
+                n_details[code] = info
+            ginfo = classify_golden_zone(hist)
+            if ginfo is not None:
+                g_codes.append(code)
+                g_details[code] = ginfo
+        return n_codes, n_details, g_codes, g_details
 
     with st.spinner("正在掃描 N字反轉型態（約需 5-15 秒）…"):
-        n_codes, n_details = get_n_reversal_results()
+        n_codes, n_details, g_codes, g_details = get_n_reversal_results()
+
+    # ══ 第一區塊：突破X高點 ════════════════════════════
+    st.markdown("#### 📈 第一區塊：剛突破 X 高點（最近 7 天內突破）")
+    st.caption("股價剛突破前波下跌的起點高位，是 N字型態完成的突破訊號")
 
     n_df = df[df['code'].isin(n_codes)].copy()
-
-    # 加入 X段細節欄位
     if not n_df.empty and n_details:
-        n_df['X高']    = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_high', ''))
-        n_df['X低']    = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_low', ''))
-        n_df['X跌幅%'] = n_df['code'].map(lambda c: n_details.get(c, {}).get('decline_pct', ''))
+        n_df['X高']      = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_high', ''))
+        n_df['X低']      = n_df['code'].map(lambda c: n_details.get(c, {}).get('x_low', ''))
+        n_df['X跌幅%']   = n_df['code'].map(lambda c: n_details.get(c, {}).get('decline_pct', ''))
         n_df['突破後漲%'] = n_df['code'].map(lambda c: n_details.get(c, {}).get('break_pct', ''))
         n_df = n_df.sort_values('score', ascending=False)
 
     if n_df.empty:
-        st.info("📭 今日無符合「N字反轉突破」型態的股票（可能因資料不足或市場無此結構）")
+        st.info("📭 今日無符合「剛突破X高點」型態的股票")
     else:
         st.caption(f"共篩選出 **{len(n_df)}** 支 ｜ 依評分高→低排序")
         st.dataframe(
             with_sparks(n_df, fmt(n_df), sparklines),
             column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
-            use_container_width=True, height=520, hide_index=True,
+            use_container_width=True, height=400, hide_index=True,
         )
-        st.caption("💡 N字反轉：股價突破前波高點，訊號有效期間請留意是否跌破底部")
+        st.caption("💡 突破後留意是否縮量回測，若低點不破 X 低則訊號持續有效")
+
+    st.divider()
+
+    # ══ 第二區塊：黃金買入區 ═══════════════════════════
+    st.markdown("#### 🥇 第二區塊：黃金買入區（回跌至 X 段 50% 位置）")
+
+    with st.expander("📖 黃金買入區邏輯說明（點擊展開）", expanded=False):
+        st.markdown("""
+**什麼情況會出現黃金買入區訊號？**
+
+1. 股票先完成了 N字反轉（突破 X 高點）
+2. 突破後股價**回跌**至 X 高到 X 低距離的 **50% 水位**
+3. 這個位置是「拉回補倉」的低風險進場區
+
+**訊號存在條件（每日收盤後判斷）：**
+- ✅ 收盤 ≤ 50% 水位（= X低 + X高度 × 50%）
+- ✅ 收盤 > 出局水位（= X低 − X高度 × 50%）
+
+**範例（X高=650，X低=550，X高度=100點）：**
+| 關鍵水位 | 計算 | 價格 |
+|--------|------|------|
+| X 高點 | 突破點 | 650 |
+| 50% 水位（黃金區上緣） | 550 + 50 | 600 |
+| X 低點 | 支撐底部 | 550 |
+| 出局水位 | 550 − 50 | 500 |
+
+> ⚠️ 跌破 500 → 出局，訊號消失
+""")
+
+    g_df = df[df['code'].isin(g_codes)].copy()
+    if not g_df.empty and g_details:
+        g_df['X高']    = g_df['code'].map(lambda c: g_details.get(c, {}).get('x_high', ''))
+        g_df['X低']    = g_df['code'].map(lambda c: g_details.get(c, {}).get('x_low', ''))
+        g_df['50%水位'] = g_df['code'].map(lambda c: g_details.get(c, {}).get('50%水位', ''))
+        g_df['出局水位'] = g_df['code'].map(lambda c: g_details.get(c, {}).get('出局水位', ''))
+        g_df['X跌幅%'] = g_df['code'].map(lambda c: g_details.get(c, {}).get('X跌幅%', ''))
+        g_df = g_df.sort_values('score', ascending=False)
+
+    if g_df.empty:
+        st.info("📭 今日無股票進入黃金買入區（N字突破後尚未回跌到 50% 位置，或已跌破出局水位）")
+    else:
+        st.caption(f"共篩選出 **{len(g_df)}** 支 ｜ 依評分高→低排序")
+        st.dataframe(
+            with_sparks(g_df, fmt(g_df), sparklines),
+            column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
+            use_container_width=True, height=400, hide_index=True,
+        )
+        st.caption("💡 黃金買入區：回跌至低風險進場區，每日收盤後自動更新是否仍在區間內")
 
 
 # ── Tab 2：弱勢股 ─────────────────────────────────────
 with tab2:
     st.markdown("### 💙 弱勢股")
-    st.caption("評分 ≤ 28，技術面 + 法人全面偏空，建議觀望")
+    st.caption("評分 ≤ 28（滿分 100 分），技術面 + 法人籌碼全面偏空，建議觀望")
+
+    with st.expander("📊 評分組成說明（點擊展開）", expanded=False):
+        st.markdown("""
+| 評分項目 | 滿分 | 評分邏輯 |
+|---------|------|---------|
+| **技術面** | 40分 | 收盤站上MA20（+15）、MA20>MA60多頭排列（+10）、RSI強弱（最高+15）、MACD轉正（+5） |
+| **量能** | 20分 | 量比 ≥ 2.0（+20）、≥ 1.5（+12）、≥ 1.2（+6）、< 0.5（-5） |
+| **法人籌碼** | 40分 | 三大法人合計淨買 > 10,000張（+40）、> 3,000張（+28）、> 500張（+16）；若法人大賣最多扣20分 |
+
+> 強勢 = **60分以上**；弱勢 = **28分以下**；中性 = 29～59分
+""")
+
     weak_df = df_view[df_view['category'] == '弱勢']
     if not weak_df.empty:
+        score_min = int(weak_df['score'].min())
+        score_max = int(weak_df['score'].max())
+        score_avg = round(weak_df['score'].mean(), 1)
+        wc1, wc2, wc3 = st.columns(3)
+        wc1.metric("最高評分", f"{score_max} 分")
+        wc2.metric("平均評分", f"{score_avg} 分")
+        wc3.metric("最低評分", f"{score_min} 分")
         st.dataframe(
             with_sparks(weak_df, fmt(weak_df), sparklines),
             column_config={'走勢': st.column_config.ImageColumn('走勢', width='small')},
             use_container_width=True, height=500, hide_index=True,
         )
-        st.caption(f"共 {len(weak_df)} 支")
+        st.caption(f"共 {len(weak_df)} 支（評分 {score_min}～{score_max} 分）")
     else:
         st.info("今日無弱勢股（或被篩選條件過濾）")
 
