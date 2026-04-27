@@ -622,7 +622,8 @@ with tab0:
         thr = '<th style="padding:10px 8px;text-align:right;white-space:nowrap">'
         html_parts = [
             '<html><body style="margin:0;padding:0;background:transparent">',
-            '<table style="width:100%;border-collapse:collapse;font-size:14px;color:#ddd">',
+            '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%">',
+            '<table style="width:max-content;min-width:100%;border-collapse:collapse;font-size:14px;color:#ddd">',
             '<thead><tr style="background:#1e1e2e;color:#aaa;text-align:left">',
             f'{th}走勢</th>{th}#</th>{th}代號</th>{th}名稱</th>',
             f'{thr}收盤價</th>{thr}漲跌%</th>{thr}量比</th>',
@@ -660,11 +661,12 @@ with tab0:
                 f'</tr>'
             )
 
-        html_parts.append('</tbody></table></body></html>')
+        html_parts.append('</tbody></table></div></body></html>')
         table_html = ''.join(html_parts)
 
-        row_height   = 52
-        table_height = 60 + len(rec_df) * row_height
+        # 每列預估高度：多個風險標籤可能換行，保守估 72px
+        row_height   = 72
+        table_height = 80 + len(rec_df) * row_height
         components.html(table_html, height=table_height, scrolling=False)
         st.caption(f"共 {len(rec_df)} 支股票觸發買進訊號（依評分高→低排序）")
 
