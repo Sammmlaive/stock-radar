@@ -18,7 +18,7 @@ RSI_PERIOD      = 14   # RSI 觀察週期
 VOLUME_AVG_DAYS = 20   # 計算均量的天數
 
 # 歷史數據天數（首次執行時回填）
-HISTORY_DAYS = 90
+HISTORY_DAYS = 120
 
 # ────────────────────────────────────────────
 # 調試模式（DEBUG_MODE = True 時只處理下方 50 支股票）

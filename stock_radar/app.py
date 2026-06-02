@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 from database import load_scores, load_scores_history, load_ohlcv_recent, has_data
 import base64
 
@@ -86,6 +88,92 @@ def fetch_taiex():
     except Exception:
         pass
     return None, None, None
+
+@st.cache_data(ttl=3600)
+def fetch_taiex_history():
+    """抓取加權指數近 120 個交易日 OHLCV，供大盤 K 線圖使用"""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker("^TWII").history(period="200d")
+        if hist.empty:
+            return pd.DataFrame()
+        out = pd.DataFrame({
+            'date':  [str(d)[:10] for d in hist.index],
+            'open':  hist['Open'].values.tolist(),
+            'high':  hist['High'].values.tolist(),
+            'low':   hist['Low'].values.tolist(),
+            'close': hist['Close'].values.tolist(),
+        })
+        return out.tail(120).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def compute_all_correlations():
+    """計算所有個股在 30/60/120 天與大盤的相關係數（一次計算全部）"""
+    try:
+        import yfinance as yf
+        taiex_raw = yf.Ticker("^TWII").history(period="200d")
+        if taiex_raw.empty:
+            return {120: {}, 60: {}, 30: {}}
+        taiex_dates = [str(d)[:10] for d in taiex_raw.index]
+        taiex_closes = taiex_raw['Close'].values.tolist()
+        taiex = pd.DataFrame({'date': taiex_dates, 'taiex_close': taiex_closes})
+
+        ohlcv = load_ohlcv_recent(days=120)
+        if ohlcv.empty:
+            return {120: {}, 60: {}, 30: {}}
+
+        results = {120: {}, 60: {}, 30: {}}
+        for code, grp in ohlcv.groupby('code'):
+            grp = grp.sort_values('date').reset_index(drop=True)
+            merged = grp.merge(taiex, on='date', how='inner')
+            for window in [120, 60, 30]:
+                sub = merged.tail(window)
+                if len(sub) < int(window * 0.7):
+                    continue
+                s = sub['close'].values.astype(float)
+                m = sub['taiex_close'].values.astype(float)
+                if s[0] <= 0 or m[0] <= 0:
+                    continue
+                corr = float(np.corrcoef(s / s[0], m / m[0])[0, 1])
+                if not np.isnan(corr):
+                    results[window][str(code)] = round(corr, 3)
+        return results
+    except Exception:
+        return {120: {}, 60: {}, 30: {}}
+
+
+@st.cache_data(ttl=3600)
+def load_home_candlestick_data(days: int = 120) -> dict:
+    """讀取首頁個股 K 線用 OHLCV（含 open/high/low/close），回傳 {code: DataFrame}"""
+    try:
+        import sqlite3
+        from config import DB_PATH
+        conn = sqlite3.connect(str(DB_PATH))
+        df = pd.read_sql(f"""
+            SELECT dp.date, dp.code, dp.open, dp.high, dp.low, dp.close
+            FROM daily_prices dp
+            WHERE dp.date IN (
+                SELECT DISTINCT date FROM daily_prices
+                ORDER BY date DESC
+                LIMIT {days}
+            )
+            AND dp.code IN (
+                SELECT DISTINCT code FROM daily_scores
+                WHERE date = (SELECT MAX(date) FROM daily_scores)
+            )
+            ORDER BY dp.date ASC
+        """, conn)
+        conn.close()
+        result = {}
+        for code, grp in df.groupby('code'):
+            result[str(code)] = grp.sort_values('date').reset_index(drop=True)
+        return result
+    except Exception:
+        return {}
+
 
 st.set_page_config(
     page_title="台股全市場雷達",
@@ -431,7 +519,144 @@ def classify_golden_zone(hist: pd.DataFrame):
 # ──────────────────────────────────────────────────────
 # 分頁
 # ──────────────────────────────────────────────────────
-tab0, tab1, tab1b, tab1c, tab2, tab3, tab4 = st.tabs(["🎯 今日推薦", "🔴 強勢股", "📉 回調整理", "🔼 N字反轉", "💙 弱勢股", "🔍 全部股票", "📊 市場分析"])
+tab_home, tab0, tab1, tab1b, tab1c, tab2, tab3, tab4 = st.tabs(["🏠 大盤總覽", "🎯 今日推薦", "🔴 強勢股", "📉 回調整理", "🔼 N字反轉", "💙 弱勢股", "🔍 全部股票", "📊 市場分析"])
+
+# ── Tab Home：大盤總覽 ────────────────────────────────
+with tab_home:
+    # ─ 資料載入 ──────────────────────────────────────────
+    with st.spinner("計算個股與大盤相關係數中（約需 15-30 秒）…"):
+        all_corr = compute_all_correlations()
+    taiex_hist = fetch_taiex_history()
+    home_ohlcv = load_home_candlestick_data(days=120)
+    name_map   = ({str(c): n for c, n in zip(df['code'], df['name'])}
+                  if not df.empty and 'name' in df.columns else {})
+    close_map  = ({str(c): float(v) for c, v in zip(df['code'], df['close'])}
+                  if not df.empty and 'close' in df.columns else {})
+    chg_map    = ({str(c): float(v or 0) for c, v in zip(df['code'], df['change_pct'])}
+                  if not df.empty and 'change_pct' in df.columns else {})
+
+    # ─ 子分頁（切換時大盤 K 線同步變化）──────────────────
+    sub120, sub60, sub30 = st.tabs(["📊 120天同步", "📊 60天同步", "📊 30天同步"])
+
+    for sub_tab, window in [(sub120, 120), (sub60, 60), (sub30, 30)]:
+        with sub_tab:
+            # ── 大盤 K 線（置頂，天數隨分頁同步）────────────
+            if not taiex_hist.empty:
+                ts = taiex_hist.tail(window).reset_index(drop=True)
+                t_end = float(ts['close'].iloc[-1])
+                t_chg = (t_end / float(ts['close'].iloc[0]) - 1) * 100
+                taiex_period_ret = t_chg
+
+                fig_tai = go.Figure(go.Candlestick(
+                    x=ts['date'],
+                    open=ts['open'], high=ts['high'],
+                    low=ts['low'],  close=ts['close'],
+                    increasing_line_color='#ef5350', increasing_fillcolor='#ef5350',
+                    decreasing_line_color='#26a69a', decreasing_fillcolor='#26a69a',
+                    name='加權指數',
+                ))
+                fig_tai.update_layout(
+                    title=dict(
+                        text=(f'📈 加權指數（近 {window} 個交易日）　'
+                              f'{t_end:,.0f}　'
+                              f'{"▲" if t_chg >= 0 else "▼"} {t_chg:+.1f}%'),
+                        font=dict(size=14, color='#ddd'), x=0, xanchor='left',
+                    ),
+                    height=300,
+                    margin=dict(t=40, b=4, l=0, r=0),
+                    plot_bgcolor='#1a1a2e',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    xaxis=dict(
+                        showgrid=False, color='#777',
+                        rangeslider=dict(visible=False),
+                        type='category', showticklabels=False,
+                    ),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2a3e', color='#777'),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_tai, use_container_width=True)
+            else:
+                taiex_period_ret = 0.0
+                st.warning("⚠️ 無法取得大盤資料，請確認網路連線")
+
+            # ── 個股 K 線（全寬橫條，超越大盤排最上方）────────
+            corr_dict = all_corr.get(window, {})
+            if not corr_dict:
+                st.info(f"📭 尚無足夠資料計算 {window} 天相關係數（請等每日更新後再試）")
+                continue
+
+            # 第一步：預計算每支股票的超額報酬，才能排序
+            stock_data = []
+            for code, corr in corr_dict.items():
+                ohlcv = home_ohlcv.get(str(code))
+                if ohlcv is None or len(ohlcv) < 5:
+                    continue
+                sub = ohlcv.tail(window).reset_index(drop=True)
+                if len(sub) < 5 or float(sub['close'].iloc[0]) <= 0:
+                    continue
+                stock_ret = (float(sub['close'].iloc[-1]) / float(sub['close'].iloc[0]) - 1) * 100
+                rel_ret   = round(stock_ret - taiex_period_ret, 1)
+                stock_data.append((code, corr, rel_ret, sub))
+
+            # 第二步：超越大盤（rel_ret > 0）排前面，各組內依超額報酬由高到低
+            stock_data.sort(key=lambda x: x[2], reverse=True)
+
+            outperform_count   = sum(1 for _, _, r, _ in stock_data if r > 0)
+            underperform_count = len(stock_data) - outperform_count
+
+            st.caption(
+                f"共 {len(stock_data)} 支（相關係數 ≥ 0.70）｜"
+                f" 🟢 超越大盤 {outperform_count} 支　🔴 落後大盤 {underperform_count} 支｜"
+                f" 依超越大盤幅度高→低排序"
+            )
+
+            displayed = 0
+            for code, corr, rel_ret, sub in stock_data:
+                rel_label = f'超越大盤 +{rel_ret:.1f}%' if rel_ret > 0 else f'落後大盤 {rel_ret:.1f}%'
+                rel_icon  = '🟢' if rel_ret > 0 else '🔴'
+
+                sname   = name_map.get(str(code), '')
+                s_close = close_map.get(str(code), float(sub['close'].iloc[-1]))
+                s_chg   = chg_map.get(str(code), 0.0)
+
+                fig_s = go.Figure(go.Candlestick(
+                    x=sub['date'],
+                    open=sub['open'], high=sub['high'],
+                    low=sub['low'],  close=sub['close'],
+                    increasing_line_color='#ef5350', increasing_fillcolor='#ef5350',
+                    decreasing_line_color='#26a69a', decreasing_fillcolor='#26a69a',
+                    name=str(code),
+                ))
+                fig_s.update_layout(
+                    title=dict(
+                        text=(f'{code} {sname}　'
+                              f'相關係數 {corr:.2f}　'
+                              f'收盤 {s_close:.2f}（{s_chg:+.2f}%）　'
+                              f'{rel_icon} {rel_label}'),
+                        font=dict(size=12, color='#ccc'), x=0, xanchor='left',
+                    ),
+                    height=160,
+                    margin=dict(t=34, b=2, l=0, r=0),
+                    plot_bgcolor='#1a1a2e',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    xaxis=dict(
+                        showgrid=False, color='#777',
+                        rangeslider=dict(visible=False),
+                        type='category', showticklabels=False,
+                    ),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2a3e', color='#777',
+                               tickfont=dict(size=9)),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_s, use_container_width=True)
+                displayed += 1
+                if displayed >= 25:
+                    st.info(f"⬆ 已顯示前 25 支（共 {len(stock_data)} 支）")
+                    break
+
+            if displayed == 0:
+                st.info("📭 目前無符合條件的個股")
+
 
 # ── Tab 0：今日推薦 ───────────────────────────────────
 with tab0:
@@ -957,7 +1182,6 @@ with tab3:
 with tab4:
     st.markdown("### 📊 今日市場強弱分佈")
 
-    import plotly.graph_objects as go
     cat_order = ['強勢', '中性', '弱勢']
     cat_color = {'強勢': '#ff4b4b', '中性': '#888888', '弱勢': '#0066cc'}
     dist = df.groupby('category').size().reset_index(name='數量')
