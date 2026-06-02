@@ -579,13 +579,23 @@ with tab_home:
                 taiex_period_ret = 0.0
                 st.warning("⚠️ 無法取得大盤資料，請確認網路連線")
 
-            # ── 個股 K 線（全寬橫條，超越大盤排最上方）────────
+            # ── 個股 K 線（全寬橫條，依相對動能狀態排序）────────
             corr_dict = all_corr.get(window, {})
             if not corr_dict:
                 st.info(f"📭 尚無足夠資料計算 {window} 天相關係數（請等每日更新後再試）")
                 continue
 
-            # 第一步：預計算每支股票的超額報酬，才能排序
+            # 近 20 天大盤報酬（固定用最新 20 根）
+            t20_ret = 0.0
+            if not taiex_hist.empty and len(taiex_hist) >= 20:
+                t20 = taiex_hist.tail(20)
+                t20_s = float(t20['close'].iloc[0])
+                t20_e = float(t20['close'].iloc[-1])
+                if t20_s > 0:
+                    t20_ret = (t20_e / t20_s - 1) * 100
+
+            # 第一步：預計算全期 & 近20天超額報酬，判定強弱狀態
+            # 狀態優先級：持續強勢(4) > 低點翻強(3) > 高點轉弱(2) > 持續弱勢(1)
             stock_data = []
             for code, corr in corr_dict.items():
                 ohlcv = home_ohlcv.get(str(code))
@@ -594,27 +604,56 @@ with tab_home:
                 sub = ohlcv.tail(window).reset_index(drop=True)
                 if len(sub) < 5 or float(sub['close'].iloc[0]) <= 0:
                     continue
+
+                # 全期超額報酬
                 stock_ret = (float(sub['close'].iloc[-1]) / float(sub['close'].iloc[0]) - 1) * 100
                 rel_ret   = round(stock_ret - taiex_period_ret, 1)
-                stock_data.append((code, corr, rel_ret, sub))
 
-            # 第二步：超越大盤（rel_ret > 0）排前面，各組內依超額報酬由高到低
-            stock_data.sort(key=lambda x: x[2], reverse=True)
+                # 近 20 天超額報酬
+                sub20 = sub.tail(20)
+                rel20 = 0.0
+                if len(sub20) >= 10 and float(sub20['close'].iloc[0]) > 0:
+                    s20_ret = (float(sub20['close'].iloc[-1]) / float(sub20['close'].iloc[0]) - 1) * 100
+                    rel20   = round(s20_ret - t20_ret, 1)
 
-            outperform_count   = sum(1 for _, _, r, _ in stock_data if r > 0)
-            underperform_count = len(stock_data) - outperform_count
+                # 判定狀態
+                full_up   = rel_ret > 0
+                recent_up = rel20  > 0
+                if full_up and recent_up:
+                    state_priority = 4
+                    state_icon  = '💪'
+                    state_label = '持續強勢'
+                elif not full_up and recent_up:
+                    state_priority = 3
+                    state_icon  = '🔄'
+                    state_label = '低點翻強'
+                elif full_up and not recent_up:
+                    state_priority = 2
+                    state_icon  = '⚠️'
+                    state_label = '高點轉弱'
+                else:
+                    state_priority = 1
+                    state_icon  = '🔴'
+                    state_label = '持續弱勢'
+
+                stock_data.append((code, corr, rel_ret, rel20,
+                                   state_priority, state_icon, state_label, sub))
+
+            # 第二步：排序 → 狀態優先級高→低，同狀態內近20天超額由高→低
+            stock_data.sort(key=lambda x: (x[4], x[3]), reverse=True)
+
+            cnt = {4: 0, 3: 0, 2: 0, 1: 0}
+            for item in stock_data:
+                cnt[item[4]] += 1
 
             st.caption(
                 f"共 {len(stock_data)} 支（相關係數 ≥ 0.70）｜"
-                f" 🟢 超越大盤 {outperform_count} 支　🔴 落後大盤 {underperform_count} 支｜"
-                f" 依超越大盤幅度高→低排序"
+                f" 💪 持續強勢 {cnt[4]}　🔄 低點翻強 {cnt[3]}　"
+                f"⚠️ 高點轉弱 {cnt[2]}　🔴 持續弱勢 {cnt[1]}"
             )
 
             displayed = 0
-            for code, corr, rel_ret, sub in stock_data:
-                rel_label = f'超越大盤 +{rel_ret:.1f}%' if rel_ret > 0 else f'落後大盤 {rel_ret:.1f}%'
-                rel_icon  = '🟢' if rel_ret > 0 else '🔴'
-
+            for code, corr, rel_ret, rel20, state_priority, state_icon, state_label, sub in stock_data:
                 sname   = name_map.get(str(code), '')
                 s_close = close_map.get(str(code), float(sub['close'].iloc[-1]))
                 s_chg   = chg_map.get(str(code), 0.0)
@@ -629,10 +668,11 @@ with tab_home:
                 ))
                 fig_s.update_layout(
                     title=dict(
-                        text=(f'{code} {sname}　'
-                              f'相關係數 {corr:.2f}　'
+                        text=(f'{state_icon} {state_label}　'
+                              f'{code} {sname}　'
                               f'收盤 {s_close:.2f}（{s_chg:+.2f}%）　'
-                              f'{rel_icon} {rel_label}'),
+                              f'全期 {rel_ret:+.1f}%　近20天 {rel20:+.1f}%　'
+                              f'相關係數 {corr:.2f}'),
                         font=dict(size=12, color='#ccc'), x=0, xanchor='left',
                     ),
                     height=160,
